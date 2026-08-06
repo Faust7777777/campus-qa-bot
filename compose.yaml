@@ -1,0 +1,48 @@
+services:
+  campus-qa-bot:
+    build:
+      context: .
+    container_name: campus-qa-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    expose:
+      - "8080"
+    volumes:
+      - ${CAMPUS_QA_RELEASES_PATH:-./releases}:/app/releases:ro
+    networks:
+      - napcat
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    cpus: 1.5
+    mem_limit: 1g
+    memswap_limit: 1g
+    mem_swappiness: 0
+    oom_score_adj: 500
+    stop_grace_period: 20s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; socket.create_connection(('127.0.0.1', 8080), 3).close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  napcat:
+    name: ${NAPCAT_NETWORK:-qq-mc-bridge_default}
+    external: true
