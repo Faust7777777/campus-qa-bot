@@ -44,9 +44,23 @@ CLOSED_CYCLE = re.compile(
 )
 # Superseded every term, so the stored copy is not the current arrangement.
 SEASONAL = re.compile(r"寒假|暑假|春节|劳动节|国庆|清明|端午|中秋|元旦|[0-9]{1,2}月[上中下]旬|补测|补缓考")
-# A one-off interruption.  These read like standing arrangements ("座位预约")
-# but describe a suspension that has long since ended.
-TEMPORARY = re.compile(r"暂停|暂缓|停用|施工|临时|延期|期间.*(调整|安排|暂)")
+# A one-off interruption or event.  These read like standing arrangements
+# ("座位预约") but describe something that has long since ended.
+TEMPORARY = re.compile(r"暂停|暂缓|停用|施工|临时|延期|举办|举行|召开|历史通知|期间.*(调整|安排|暂)")
+
+# --- signals read from the evidence text rather than the title ---------------
+# An article of a standing regulation.  A 管理办法 does not expire because the
+# notice publishing it carries a date.
+REGULATION_ARTICLE = re.compile(r"第[一二三四五六七八九十百]+条")
+# A deadline or a scheduled window that has passed.  The content is about *when*
+# something happened, so it cannot answer "how do I do this" today.
+DATE_BOUND = re.compile(
+    r"截止"
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*日\s*[-–—至到]"
+    r"|\d{1,2}\s*月\s*\d{1,2}\s*日\s*前"
+    r"|于\s*\d{1,2}\s*月\s*\d{1,2}\s*日"
+    r"|(测试|考试|报到|服务|申报)时间\s*[：:为]"
+)
 # Describes how something works rather than that something happened.
 EVERGREEN = re.compile(
     r"流程|办法|规定|细则|条例|制度|条件|要求|方式|材料|入口|地点|联系|电话|咨询"
@@ -54,15 +68,24 @@ EVERGREEN = re.compile(
 )
 
 
-def classify(title: str) -> tuple[str, str]:
-    """Return (action, reason).  Order matters: closure beats evergreen wording."""
+def classify(title: str, evidence: str = "") -> tuple[str, str]:
+    """Return (action, reason).
 
+    Order matters.  A regulation article is decisive whatever the title looks
+    like; otherwise a closed cycle beats evergreen wording, and a deadline in
+    the evidence beats an evergreen-sounding title.
+    """
+
+    if REGULATION_ARTICLE.search(evidence):
+        return "recover", "quotes an article of a standing regulation"
     if CLOSED_CYCLE.search(title):
         return "keep", "names a closed cycle"
     if SEASONAL.search(title):
         return "keep", "seasonal arrangement, superseded each term"
     if TEMPORARY.search(title):
         return "keep", "one-off interruption, not a standing arrangement"
+    if DATE_BOUND.search(evidence):
+        return "keep", "evidence is a deadline or a scheduled window"
     if EVERGREEN.search(title):
         return "recover", "standing procedure, rule or contact"
     return "review", "no decisive signal - needs a human"
@@ -98,7 +121,9 @@ def main() -> int:
         card = row["card"]
         if card.get("card_kind") != "fact" or card.get("validity") != "historical":
             continue
-        proposals[card["card_id"]] = classify(card.get("title", ""))
+        proposals[card["card_id"]] = classify(
+            card.get("title", ""), card.get("evidence_quote", "") or ""
+        )
 
     # Parent and child must share a validity, so a card can only move if every
     # relative it is bound to moves with it.

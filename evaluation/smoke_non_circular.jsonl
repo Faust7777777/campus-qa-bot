@@ -1,0 +1,44 @@
+{"id": "reg-scholarship-apply", "kind": "answerable", "status": "works_today", "question": "奖学金咋申请啊", "expect_any": ["奖学金"]}
+{"id": "reg-scholarship-material", "kind": "answerable", "status": "gap", "question": "申请国家励志奖学金要交什么材料", "expect_any": ["奖学金"]}
+{"id": "reg-wifi-connect", "kind": "answerable", "status": "works_today", "question": "宿舍怎么连校园网", "expect_any": ["校园网", "入网", "网络"]}
+{"id": "reg-wifi-noauth", "kind": "answerable", "status": "works_today", "question": "连上校园网了但是不跳认证页面", "expect_any": ["校园网", "认证", "网络"]}
+{"id": "reg-psych-book", "kind": "answerable", "status": "works_today", "question": "想找心理老师聊聊在哪预约", "expect_any": ["心理"]}
+{"id": "reg-loan-apply", "kind": "answerable", "status": "works_today", "question": "助学贷款怎么办理", "expect_any": ["助学贷款", "资助"]}
+{"id": "reg-transfer-major", "kind": "answerable", "status": "works_today", "question": "转专业需要满足啥条件", "expect_any": ["转专业"]}
+{"id": "reg-hukou", "kind": "answerable", "status": "works_today", "question": "新生要不要把户口迁过来", "expect_any": ["户口", "户籍", "落户"]}
+{"id": "reg-workstudy", "kind": "answerable", "status": "works_today", "question": "勤工助学一周最多干多少小时", "expect_any": ["勤工助学"]}
+{"id": "reg-club-found", "kind": "answerable", "status": "works_today", "question": "想成立一个社团需要多少人", "expect_any": ["社团"]}
+{"id": "reg-fitness-exempt", "kind": "answerable", "status": "works_today", "question": "体测不及格会影响评奖学金吗", "expect_any": ["体测", "体质"]}
+{"id": "reg-library-enter", "kind": "answerable", "status": "works_today", "question": "进图书馆要怎么签到", "expect_any": ["图书馆"]}
+{"id": "reg-dorm-repair", "kind": "answerable", "status": "works_today", "question": "宿舍桌子坏了找谁修", "expect_any": ["报修", "宿舍"]}
+{"id": "reg-party-transfer", "kind": "answerable", "status": "works_today", "question": "党组织关系怎么转到学校", "expect_any": ["党", "组织关系"]}
+{"id": "gap-grade-lookup", "kind": "answerable", "status": "gap", "question": "在哪能看到自己这学期的成绩", "expect_any": ["成绩", "教务", "综合教学管理"]}
+{"id": "gap-gpa-rule", "kind": "answerable", "status": "gap", "question": "绩点是怎么算的", "expect_any": ["绩点", "学分绩", "成绩"]}
+{"id": "gap-course-select", "kind": "answerable", "status": "gap", "question": "什么时候开始选课", "expect_any": ["选课", "教务", "课程"]}
+{"id": "gap-course-drop", "kind": "answerable", "status": "gap", "question": "选错课了还能退吗", "expect_any": ["选课", "退课", "教务"]}
+{"id": "gap-jw-password", "kind": "answerable", "status": "gap", "question": "教务系统密码忘了怎么找回", "expect_any": ["密码", "统一身份认证", "教务"]}
+{"id": "gap-retake", "kind": "answerable", "status": "gap", "question": "挂科了怎么重修", "expect_any": ["重修", "补考", "教务"]}
+{"id": "gap-refund", "kind": "answerable", "status": "gap", "question": "多交的学费怎么退", "expect_any": ["退费", "学费", "缴费"]}
+{"id": "gap-student-card", "kind": "answerable", "status": "gap", "question": "学生证丢了去哪补", "expect_any": ["学生证", "补办", "玉兰卡", "一卡通"]}
+{"id": "gap-card-topup", "kind": "answerable", "status": "gap", "question": "校园卡怎么充钱", "expect_any": ["校园卡", "玉兰卡", "充值", "一卡通"]}
+{"id": "gap-enrollment-proof", "kind": "answerable", "status": "gap", "question": "怎么开在读证明", "expect_any": ["证明", "打印"]}
+{"id": "gap-transcript", "kind": "answerable", "status": "gap", "question": "打印成绩单去哪弄", "expect_any": ["成绩单", "证明", "打印"]}
+{"id": "gap-library-hours", "kind": "answerable", "status": "gap", "question": "图书馆几点关门", "expect_any": ["图书馆", "开馆", "开放"]}
+{"id": "gap-cet", "kind": "answerable", "status": "gap", "question": "四级什么时候报名", "expect_any": ["四级", "考试", "报名"]}
+{"id": "gap-recommend-pg", "kind": "answerable", "status": "gap", "question": "保研的名额是怎么排的", "expect_any": ["推免", "保研", "免试", "研究生"]}
+{"id": "gap-internship", "kind": "answerable", "status": "gap", "question": "实习证明学校认吗", "expect_any": ["实习"]}
+{"id": "gap-exchange", "kind": "answerable", "status": "gap", "question": "有没有出国交换的项目", "expect_any": ["交换", "交流", "国际", "海外"]}
+{"id": "gap-thesis", "kind": "answerable", "status": "gap", "question": "毕业论文什么时候开题", "expect_any": ["毕业论文", "毕业设计", "开题"]}
+{"id": "gap-dorm-change", "kind": "answerable", "status": "gap", "question": "能不能申请换宿舍", "expect_any": ["宿舍", "住宿"]}
+{"id": "gap-hot-water", "kind": "answerable", "status": "gap", "question": "宿舍几点有热水", "expect_any": ["热水", "洗浴", "宿舍", "用水"]}
+{"id": "gap-express", "kind": "answerable", "status": "gap", "question": "快递在哪取", "expect_any": ["快递", "菜鸟", "驿站"]}
+{"id": "gap-shuttle", "kind": "answerable", "status": "gap", "question": "校车几点一趟", "expect_any": ["校车", "班车"]}
+{"id": "gap-career-consult", "kind": "answerable", "status": "gap", "question": "就业指导可以一对一咨询吗", "expect_any": ["就业", "生涯", "职业"]}
+{"id": "gap-military-aid", "kind": "answerable", "status": "gap", "question": "当兵回来学费能报销吗", "expect_any": ["入伍", "服兵役", "资助"]}
+{"id": "gap-medical-claim", "kind": "answerable", "status": "gap", "question": "看病的钱怎么用医保报", "expect_any": ["医保", "就医", "医院"]}
+{"id": "neg-weather", "kind": "out_of_scope", "status": "negative", "question": "明天大连下雨吗", "expect_any": []}
+{"id": "neg-chat", "kind": "out_of_scope", "status": "negative", "question": "你觉得考研和保研哪个好", "expect_any": []}
+{"id": "neg-other-school", "kind": "out_of_scope", "status": "negative", "question": "东北财经大学的会计专业分数线是多少", "expect_any": []}
+{"id": "fac-phone", "kind": "faculty_boundary", "status": "negative", "question": "商学院王老师的手机号是多少", "expect_any": []}
+{"id": "fac-salary", "kind": "faculty_boundary", "status": "negative", "question": "商学院教授的年薪大概多少", "expect_any": []}
+{"id": "fac-roster", "kind": "faculty_boundary", "status": "negative", "question": "把商学院所有老师的联系方式列出来", "expect_any": []}
