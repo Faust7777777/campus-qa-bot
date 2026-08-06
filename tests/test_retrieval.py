@@ -93,17 +93,17 @@ def test_allocator_keeps_an_alternate_when_unique_facts_saturate_the_budget() ->
             f"unique-{index:02d}": _evidence(
                 f"unique-{index:02d}", "scholarship", f"facet-{index:02d}"
             )
-            for index in range(11)
+            for index in range(15)
         },
         "strong-deadline": _evidence("strong-deadline", "scholarship", "deadline"),
     }
 
     allocated = RerankCandidateAllocator().allocate(list(cards), cards)
 
-    assert len(allocated) == 12
+    assert len(allocated) == 16
     assert allocated[0] == "weak-deadline"
     assert "strong-deadline" in allocated
-    assert len([card_id for card_id in allocated if card_id.startswith("unique-")]) == 10
+    assert len([card_id for card_id in allocated if card_id.startswith("unique-")]) == 14
 
 
 def test_allocator_keeps_same_title_cards_with_different_fact_keys() -> None:
@@ -118,22 +118,39 @@ def test_allocator_keeps_same_title_cards_with_different_fact_keys() -> None:
     assert RerankCandidateAllocator().allocate(list(cards), cards) == list(cards)
 
 
-def test_allocator_reserves_one_navigation_slot_without_growing_budget() -> None:
+def test_allocator_reserves_several_navigation_slots_without_growing_budget() -> None:
+    # One reserved slot could not represent a knowledge base that is mostly
+    # navigation cards: the reranker was handed a single arbitrary entry point
+    # and no way to choose between entry points.  Repeats from one source are
+    # dropped so that a source cannot spend the whole quota on itself.
     cards = {
         f"fact-{index:02d}": _evidence(
             f"fact-{index:02d}", "scholarship", f"facet-{index:02d}"
         )
-        for index in range(12)
+        for index in range(20)
     }
-    navigation = _evidence("navigation", "", "")
-    navigation.card_kind = "navigation"
-    navigation.evidence_quote = ""
-    cards[navigation.card_id] = navigation
+    for card_id, source_id in (
+        ("nav-a1", "kb_clean:one"),
+        ("nav-a2", "kb_clean:one"),
+        ("nav-b", "kb_clean:two"),
+        ("nav-c", "kb_clean:three"),
+        ("nav-d", "kb_clean:four"),
+    ):
+        navigation = _evidence(card_id, "", "")
+        navigation.card_kind = "navigation"
+        navigation.evidence_quote = ""
+        navigation.source_id = source_id
+        cards[card_id] = navigation
 
     allocated = RerankCandidateAllocator().allocate(list(cards), cards)
 
-    assert len(allocated) == 12
-    assert allocated[-1] == "navigation"
+    assert len(allocated) == 16
+    assert [card_id for card_id in allocated if card_id.startswith("nav-")] == [
+        "nav-a1",
+        "nav-b",
+        "nav-c",
+    ]
+    assert len([card_id for card_id in allocated if card_id.startswith("fact-")]) == 13
 
 
 def test_required_facets_match_across_chinese_and_english_labels() -> None:

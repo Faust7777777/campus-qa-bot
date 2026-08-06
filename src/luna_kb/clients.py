@@ -1,21 +1,45 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import hashlib
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from .contracts import MAX_SEMANTIC_TEXT_CHARS
+from .contracts import MAX_EMBEDDING_BATCH_SIZE, MAX_SEMANTIC_TEXT_CHARS
 from .errors import RetrievalUnavailable
 
 MAX_MODEL_RESPONSE_BYTES = 2 * 1024 * 1024
-MAX_EMBEDDING_BATCH_SIZE = 32
-MAX_TRANSIENT_RETRIES = 5
+# Five retries with a doubling backoff capped at 30s meant a single question
+# could sleep 2+4+8+16+30 = 60 seconds before failing, which is where the
+# observed 48-second tail came from.  Two retries with a short cap bound the
+# worst case to 1.5 seconds of sleeping.
+MAX_TRANSIENT_RETRIES = 2
+RETRY_BASE_DELAY_SECONDS = 0.5
+RETRY_MAX_DELAY_SECONDS = 4.0
+TRANSIENT_STATUS_CODES = frozenset({429, 502, 503, 504})
+
+
+def transient_retry_delay(attempt: int, retry_after: str = "") -> float:
+    """Backoff for one transient failure, honouring a bounded ``retry-after``.
+
+    A gateway asking for a long wait cannot hold a group question open
+    indefinitely, so the server's hint is clamped like any other delay.
+    """
+
+    try:
+        delay = float(retry_after)
+    except (TypeError, ValueError):
+        delay = RETRY_BASE_DELAY_SECONDS * float(2**attempt)
+    return min(max(delay, RETRY_BASE_DELAY_SECONDS), RETRY_MAX_DELAY_SECONDS)
+
+
 MODEL_PROTOCOL_VERSION = "evidence-draft-v2"
 PLANNER_SYSTEM_PROMPT = (
     "你是校园知识库查询规划器。仅输出JSON对象，字段必须为intent、standalone_query、"
@@ -52,16 +76,86 @@ def prompt_contract_sha256() -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def runtime_code_sha256() -> str:
-    root = Path(__file__).resolve().parent
+def _package_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _hash_sources(paths: Iterable[Path], root: Path) -> str:
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*.py"), key=lambda value: value.relative_to(root).as_posix()):
+    for path in sorted(paths, key=lambda value: value.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
         digest.update(relative)
         digest.update(b"\0")
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _intra_package_imports(path: Path, root: Path) -> set[Path]:
+    """Modules inside this package that ``path`` imports.
+
+    ``ast.walk`` also finds imports written inside function bodies, so a lazy
+    import cannot hide a dependency from the build scope.
+    """
+
+    found: set[Path] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    package_parts = list(path.relative_to(root).parts[:-1])
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.level:
+            continue
+        base = list(package_parts)
+        for _ in range(node.level - 1):
+            if base:
+                base.pop()
+        parts = base + (node.module.split(".") if node.module else [])
+        target = root.joinpath(*parts) if parts else root
+        module = target.with_suffix(".py")
+        if module.is_file():
+            found.add(module)
+            continue
+        if (target / "__init__.py").is_file():
+            found.add(target / "__init__.py")
+            for alias in node.names:
+                submodule = target / f"{alias.name}.py"
+                if submodule.is_file():
+                    found.add(submodule)
+    return found
+
+
+def build_scoped_modules() -> set[Path]:
+    """Every module reachable from the database builder.
+
+    Derived from the import graph rather than a hand-written list, so adding a
+    dependency to the builder cannot silently narrow what the build hash
+    covers.  ``test_build_scope_is_derived_from_the_import_graph`` pins the
+    resulting set so any change is a deliberate one.
+    """
+
+    root = _package_root()
+    entry = root / "pipeline" / "build.py"
+    reached = {entry}
+    pending = [entry]
+    while pending:
+        for module in _intra_package_imports(pending.pop(), root):
+            if module not in reached:
+                reached.add(module)
+                pending.append(module)
+    return reached
+
+
+def build_code_sha256() -> str:
+    """Hash of the code that determines the built artifact's contents."""
+
+    root = _package_root()
+    return _hash_sources(build_scoped_modules(), root)
+
+
+def runtime_code_sha256() -> str:
+    """Hash of every module, including the query-time code the build never runs."""
+
+    root = _package_root()
+    return _hash_sources(root.rglob("*.py"), root)
 
 
 @dataclass(slots=True)
@@ -74,6 +168,35 @@ class ModelEndpoints:
     answer_model: str
     reranker_url: str
     timeout: float
+
+
+def release_build_config(
+    endpoints: ModelEndpoints, *, embedding_dimension: int
+) -> dict[str, Any]:
+    """Configuration that actually determines the built database's contents.
+
+    Deliberately excludes everything that only affects query time - planner,
+    reranker and answer models, prompts, timeouts, and the query-time code.
+    Folding those into the build identity meant that editing the QQ adapter
+    invalidated a knowledge build, which forced a full re-embed of every card
+    and changed ``knowledge_sha256``: a provenance chain that made the artifact
+    churn is weaker, not stronger.  "The running code is the evaluated code"
+    remains enforced separately, against the evaluation report.
+    """
+
+    endpoint_payload = json.dumps(
+        {"base_url": endpoints.base_url.rstrip("/")},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "embedding": endpoints.embedding_model,
+        "embedding_dimension": embedding_dimension,
+        "endpoint_sha256": hashlib.sha256(endpoint_payload).hexdigest(),
+        "build_code_sha256": build_code_sha256(),
+        "max_embedding_batch_size": MAX_EMBEDDING_BATCH_SIZE,
+        "max_semantic_text_chars": MAX_SEMANTIC_TEXT_CHARS,
+    }
 
 
 def release_model_config(
@@ -128,13 +251,15 @@ class RemoteModels:
                 async with self.client.stream(
                     "POST", url, headers=self.headers, json=payload
                 ) as response:
-                    if response.status_code in {429, 502, 503, 504} and attempt < MAX_TRANSIENT_RETRIES:
-                        retry_after = response.headers.get("retry-after", "").strip()
-                        try:
-                            delay = float(retry_after)
-                        except (TypeError, ValueError):
-                            delay = float(2 ** (attempt + 1))
-                        await asyncio.sleep(min(max(delay, 0.5), 30.0))
+                    if (
+                        response.status_code in TRANSIENT_STATUS_CODES
+                        and attempt < MAX_TRANSIENT_RETRIES
+                    ):
+                        await asyncio.sleep(
+                            transient_retry_delay(
+                                attempt, response.headers.get("retry-after", "").strip()
+                            )
+                        )
                         continue
                     response.raise_for_status()
                     content_length = response.headers.get("content-length")
@@ -149,6 +274,16 @@ class RemoteModels:
                 if not isinstance(data, dict):
                     raise ValueError("response is not an object")
                 return data
+            except httpx.TransportError as exc:
+                # A timeout or dropped connection is at least as transient as a
+                # 503, but used to get zero retries while a 503 got five.  Both
+                # now share one budget.  Protocol failures (4xx, oversized or
+                # malformed bodies) still fail immediately: retrying cannot help.
+                last_error = exc
+                if attempt < MAX_TRANSIENT_RETRIES:
+                    await asyncio.sleep(transient_retry_delay(attempt))
+                    continue
+                break
             except Exception as exc:
                 last_error = exc
                 break

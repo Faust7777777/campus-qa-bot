@@ -32,7 +32,12 @@ def test_runtime_limits_match_the_confirmed_vps_capacity() -> None:
     assert settings.answer_queue_size == 50
     assert settings.max_question_chars == 500
     assert settings.answer_queue_timeout_seconds == 30
-    assert settings.answer_total_timeout_seconds == 90
+    # A single question is capped near the 10s p95 target rather than the old
+    # 90s, which let one stalled gateway call hold a group question open far
+    # past the point where anyone was still waiting for it.  The queue timeout
+    # stays separate: that is backpressure under load, not a per-question tail.
+    assert settings.answer_total_timeout_seconds == 15
+    assert settings.request_timeout == 8
 
 
 def test_empty_group_allowlist_fails_closed() -> None:

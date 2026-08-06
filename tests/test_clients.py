@@ -8,9 +8,26 @@ from luna_kb.clients import (
     MAX_MODEL_RESPONSE_BYTES,
     ModelEndpoints,
     RemoteModels,
+    _package_root,
+    build_scoped_modules,
+    release_build_config,
     release_model_config,
+    transient_retry_delay,
 )
 from luna_kb.errors import RetrievalUnavailable
+
+
+def _endpoints() -> ModelEndpoints:
+    return ModelEndpoints(
+        base_url="https://models.example.test/v1",
+        api_key="test-key",
+        planner_model="planner",
+        embedding_model="embedding",
+        reranker_model="reranker",
+        answer_model="answer",
+        reranker_url="https://models.example.test/rerank",
+        timeout=5,
+    )
 
 
 @pytest.mark.asyncio
@@ -294,3 +311,124 @@ async def test_healthcheck_probes_all_four_model_contracts() -> None:
         await client.aclose()
 
     assert called_models == ["embedding", "reranker", "planner", "answer"]
+
+
+def test_transient_retry_delay_is_bounded_in_both_directions() -> None:
+    # The old backoff reached 30s per attempt over five attempts, so one
+    # question could sleep 60s before failing.
+    assert [transient_retry_delay(attempt) for attempt in range(3)] == [0.5, 1.0, 2.0]
+    # A gateway cannot hold a group question open by asking for a long wait.
+    assert transient_retry_delay(0, "600") == 4.0
+    assert transient_retry_delay(0, "0.01") == 0.5
+    assert transient_retry_delay(0, "not-a-number") == 0.5
+
+
+@pytest.mark.asyncio
+async def test_post_retries_a_dropped_connection_like_a_gateway_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A timeout or dropped connection is at least as transient as a 503, but
+    # used to get zero retries while a 503 got five.
+    attempts = 0
+    sleeps: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(
+            200, json={"data": [{"index": 0, "embedding": [0.1, 0.2, 0.3]}]}
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("luna_kb.clients.asyncio.sleep", fake_sleep)
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    models = RemoteModels(_endpoints(), client=client)
+    try:
+        vectors = await models.embed(["retry me"])
+    finally:
+        await client.aclose()
+
+    assert attempts == 2
+    assert sleeps == [0.5]
+    assert vectors == [[0.1, 0.2, 0.3]]
+
+
+@pytest.mark.asyncio
+async def test_post_does_not_retry_a_protocol_failure() -> None:
+    # Retrying cannot fix a 4xx or a malformed body, so those still fail fast.
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(400, json={"error": "bad request"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    models = RemoteModels(_endpoints(), client=client)
+    try:
+        with pytest.raises(RetrievalUnavailable):
+            await models.embed(["no retry"])
+    finally:
+        await client.aclose()
+
+    assert attempts == 1
+
+
+def test_build_scope_is_derived_from_the_import_graph() -> None:
+    # Pinned so that adding an import to the builder is a deliberate widening of
+    # what a knowledge build is bound to, not a silent one.
+    root = _package_root()
+    scope = sorted(path.relative_to(root).as_posix() for path in build_scoped_modules())
+
+    assert scope == [
+        "attestation.py",
+        "contracts.py",
+        "errors.py",
+        "pipeline/build.py",
+        "scope_policy.py",
+        "vector.py",
+    ]
+
+
+def test_build_hash_excludes_query_time_code() -> None:
+    # The whole point of splitting the hashes: editing retrieval, the answer
+    # service or the QQ adapter must not invalidate a knowledge build, because
+    # none of them can change a single byte of the database.
+    root = _package_root()
+    scope = build_scoped_modules()
+
+    for runtime_only in (
+        "retrieval.py",
+        "service.py",
+        "nonebot_plugin.py",
+        "application.py",
+        "policy.py",
+        "candidate_allocation.py",
+        "query_fastpath.py",
+    ):
+        assert root / runtime_only not in scope
+
+    # ...while the modules that do determine the database contents are covered.
+    for build_critical in ("pipeline/build.py", "contracts.py", "vector.py"):
+        assert root / build_critical in scope
+
+
+def test_build_config_excludes_query_time_settings() -> None:
+    config = release_build_config(_endpoints(), embedding_dimension=1024)
+
+    assert set(config) == {
+        "embedding",
+        "embedding_dimension",
+        "endpoint_sha256",
+        "build_code_sha256",
+        "max_embedding_batch_size",
+        "max_semantic_text_chars",
+    }
+    assert "runtime_code_sha256" not in config
+    assert "prompt_contract_sha256" not in config
+    assert "reranker" not in config
+    assert "request_timeout_seconds" not in config

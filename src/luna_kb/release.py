@@ -29,6 +29,14 @@ REQUIRED_ARTIFACTS = {
     "build_report.json",
     "review_report.json",
 }
+REQUIRED_BUILD_CONFIG_FIELDS = {
+    "embedding",
+    "embedding_dimension",
+    "endpoint_sha256",
+    "build_code_sha256",
+    "max_embedding_batch_size",
+    "max_semantic_text_chars",
+}
 REQUIRED_MODEL_CONFIG_FIELDS = {
     "planner",
     "embedding",
@@ -99,7 +107,7 @@ class ReleaseManager:
         if review_report.get("reviewed_sha256") != reviewed_sha256:
             raise BuildError("review report is not bound to the built reviewed input")
         build_model_config = build_report.get("model_config")
-        self._validate_model_config(build_model_config)
+        self._validate_build_config(build_model_config)
         self._validate_database_binding(path, manifest, build_report, build_model_config)
         actual_counts = build_report.get("review_status_counts", {})
         count_keys = ("approved", "downgraded", "rejected", "pending")
@@ -125,8 +133,8 @@ class ReleaseManager:
             if evaluation_report.get("knowledge_sha256") != actual_hash:
                 raise BuildError("evaluation report is not bound to knowledge.sqlite")
             self._validate_evaluation_binding(version, evaluation_report)
-            if evaluation_report.get("model_config") != build_model_config:
-                raise BuildError("evaluation model configuration differs from database build")
+            if evaluation_report.get("build_config") != build_model_config:
+                raise BuildError("evaluation did not run against this database build")
             if evaluation_report["model_config"].get(
                 "runtime_code_sha256"
             ) != runtime_code_sha256():
@@ -209,6 +217,35 @@ class ReleaseManager:
             or faculty_count != 0
         ):
             raise BuildError("knowledge database row counts do not match the build report")
+
+    @staticmethod
+    def _validate_build_config(build_config: Any) -> None:
+        """Validate the configuration that determines the database contents.
+
+        Query-time settings are deliberately absent here.  They are validated
+        on the evaluation report instead, which is what actually exercised
+        them; binding them to the build only forced the artifact to be
+        regenerated whenever unrelated runtime code changed.
+        """
+
+        if not isinstance(build_config, dict) or not REQUIRED_BUILD_CONFIG_FIELDS.issubset(
+            build_config
+        ):
+            raise BuildError("release lacks the complete build configuration")
+        if any(build_config.get(name) in {None, ""} for name in REQUIRED_BUILD_CONFIG_FIELDS):
+            raise BuildError("release contains an empty build configuration value")
+        for field in ("endpoint_sha256", "build_code_sha256"):
+            if not SHA256_RE.fullmatch(str(build_config.get(field) or "")):
+                raise BuildError(f"release has an invalid build {field}")
+        try:
+            if int(build_config["embedding_dimension"]) <= 0:
+                raise ValueError
+            if int(build_config["max_embedding_batch_size"]) <= 0:
+                raise ValueError
+            if int(build_config["max_semantic_text_chars"]) <= 0:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise BuildError("release has invalid numeric build configuration") from exc
 
     @staticmethod
     def _validate_model_config(model_config: Any) -> None:
@@ -430,8 +467,8 @@ class ReleaseManager:
         ) != runtime_code_sha256():
             raise BuildError("evaluation report does not match the current runtime code")
         build_report = json.loads((path / "build_report.json").read_text(encoding="utf-8"))
-        if evaluation_report.get("model_config") != build_report.get("model_config"):
-            raise BuildError("evaluation model configuration differs from database build")
+        if evaluation_report.get("build_config") != build_report.get("model_config"):
+            raise BuildError("evaluation did not run against this database build")
         report_path = path / "evaluation_report.json"
         report_path.write_text(
             json.dumps(evaluation_report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

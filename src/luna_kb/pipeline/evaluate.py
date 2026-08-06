@@ -25,7 +25,6 @@ from ..errors import BuildError, InsufficientEvidence, RetrievalUnavailable
 from ..service import AnswerService
 
 
-NAVIGATION_ANSWER = "已定位到相关官方页面，具体内容请以该页面最新说明为准。"
 def load_evaluation_set_snapshot(
     snapshot: ArtifactSnapshot, minimum: int = 300
 ) -> list[dict[str, Any]]:

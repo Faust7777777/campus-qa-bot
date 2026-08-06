@@ -9,7 +9,11 @@ from luna_kb.errors import RetrievalUnavailable
 from luna_kb.pipeline.build import build_database
 from luna_kb.retrieval import KnowledgeDatabase, StrongRetriever
 from luna_kb.runtime_controls import QueueFull, WorkLimiter
-from luna_kb.service import AnswerService
+from luna_kb.service import (
+    NAVIGATION_ONLY_ANSWER,
+    NAVIGATION_ONLY_QUALITY,
+    AnswerService,
+)
 
 
 class LongAnswerModels:
@@ -354,8 +358,13 @@ async def test_navigation_only_result_returns_a_program_owned_official_link(
     try:
         result = await service.ask("奖学金怎么申请")
 
-        assert result.answer == "已定位到相关官方页面，具体内容请以该页面最新说明为准。"
+        assert result.answer == NAVIGATION_ONLY_ANSWER
+        # "Found the entry point, no procedure text" is its own answer status,
+        # not a draft, and must not read as "this does not exist".
+        assert result.quality == NAVIGATION_ONLY_QUALITY
+        assert not result.needs_review
         assert result.sources[0].url == item.source.canonical_url
+        assert result.cited_card_ids == (item.card.card_id,)
     finally:
         database.close()
 

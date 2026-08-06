@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 
 from ..attestation import ArtifactSnapshot
-from ..clients import ModelEndpoints, RemoteModels, release_model_config
+from ..clients import (
+    ModelEndpoints,
+    RemoteModels,
+    release_build_config,
+    release_model_config,
+)
 from ..config import Settings
 from ..errors import BuildError, ContractError, KnowledgeError
 from ..evaluation_policy import FORMAL_FACULTY_SET_SHA256
@@ -152,10 +157,8 @@ async def _build(args: argparse.Namespace) -> dict[str, object]:
     manager = ReleaseManager(settings.release_root)
     staging = manager.new_staging(args.version)
     models = _settings_models(settings)
-    build_model_config = release_model_config(
-        models.endpoints,
-        embedding_dimension=settings.embedding_dimension,
-        rerank_min_score=settings.rerank_min_score,
+    build_model_config = release_build_config(
+        models.endpoints, embedding_dimension=settings.embedding_dimension
     )
     try:
         reviewed_snapshot = ArtifactSnapshot.from_path(args.reviewed)
@@ -175,12 +178,10 @@ async def _build(args: argparse.Namespace) -> dict[str, object]:
             settings.embedding_dimension,
         )
         build_report["reviewed_sha256"] = reviewed_sha256
-        if release_model_config(
-            models.endpoints,
-            embedding_dimension=settings.embedding_dimension,
-            rerank_min_score=settings.rerank_min_score,
+        if release_build_config(
+            models.endpoints, embedding_dimension=settings.embedding_dimension
         ) != build_model_config:
-            raise BuildError("runtime code or model configuration changed during database build")
+            raise BuildError("build code or embedding configuration changed during database build")
         reviewed_snapshot.assert_path_unchanged(args.reviewed)
         review_report_snapshot.assert_path_unchanged(args.review_report)
         build_report["model_config"] = build_model_config
@@ -220,13 +221,16 @@ async def _evaluate(args: argparse.Namespace) -> dict[str, object]:
         embedding_dimension=settings.embedding_dimension,
         rerank_min_score=settings.rerank_min_score,
     )
+    evaluation_build_config = release_build_config(
+        models.endpoints, embedding_dimension=settings.embedding_dimension
+    )
     try:
         build_report = json.loads(
             (release_path / "build_report.json").read_text(encoding="utf-8")
         )
-        if build_report.get("model_config") != evaluation_model_config:
+        if build_report.get("model_config") != evaluation_build_config:
             raise BuildError(
-                "evaluation model or runtime code configuration differs from database build"
+                "evaluation embedding or build configuration differs from database build"
             )
         gold_closure = validate_evaluation_gold(database, evaluation_items)
         service = AnswerService(
@@ -261,6 +265,9 @@ async def _evaluate(args: argparse.Namespace) -> dict[str, object]:
                 "evaluation_set_sha256": evaluation_snapshot.sha256,
                 "faculty_set_sha256": faculty_snapshot.sha256,
                 "model_config": evaluation_model_config,
+                # Proves which build this evaluation ran against, without
+                # binding the build to query-time code.
+                "build_config": evaluation_build_config,
                 "gold_closure": gold_closure,
             }
         )

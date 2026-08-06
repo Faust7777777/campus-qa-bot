@@ -51,6 +51,14 @@ class QuestionAnswer:
         return "\n".join(lines)
 
 
+# Answer used when retrieval found official entry points but the knowledge base
+# holds no body text for the question.  It must not read as "this does not
+# exist": the entry point was found, the procedure text simply is not stored.
+NAVIGATION_ONLY_ANSWER = (
+    "已找到相关官方页面，但知识库中暂无该事项的正文说明，具体办理要求请以下列页面的最新内容为准。"
+)
+NAVIGATION_ONLY_QUALITY = "navigation"
+
 URL_RE = re.compile(
     r"(?:https?://|www\.|(?<![\w@])(?:[a-z0-9-]+\.)+(?:com|cn|edu|org|net|io)(?:[/:]|\b))",
     re.IGNORECASE,
@@ -182,24 +190,22 @@ class AnswerService:
         result = await self.retriever.retrieve(question, history)
         evidence_cards = [card for card in result.cards if card.evidence_quote]
         if not evidence_cards:
-            top_card = max(result.cards, key=lambda card: card.rerank_score)
+            # Retrieval already ordered these; keep that order rather than
+            # re-sorting by rerank score, which is too tightly banded to rank
+            # entry points against each other.
+            citations = self._navigation_citations(result.cards)
             return QuestionAnswer(
-                answer="已定位到相关官方页面，具体内容请以该页面最新说明为准。",
-                sources=[
-                    SourceCitation(
-                        index=1,
-                        card_id=top_card.card_id,
-                        title=top_card.source_title or top_card.title,
-                        url=top_card.canonical_url,
-                        locator=top_card.source_locator,
-                    )
-                ],
+                answer=NAVIGATION_ONLY_ANSWER,
+                sources=citations,
                 retrieval=result,
-                cited_card_ids=(top_card.card_id,),
+                cited_card_ids=tuple(source.card_id for source in citations),
+                quality=NAVIGATION_ONLY_QUALITY,
             )
         evidence = [self._evidence_payload(card) for card in evidence_cards]
         try:
+            started = time.perf_counter()
             draft = await self.models.draft_answer(question, evidence)
+            result.trace.stage_seconds["answer_model"] = time.perf_counter() - started
             answer, cited_ids, needs_review, quality_notes = self._validate_draft(
                 draft,
                 evidence_cards,
@@ -242,6 +248,26 @@ class AnswerService:
             needs_review,
             quality_notes,
         )
+
+    def _navigation_citations(self, cards: list[CardEvidence]) -> list[SourceCitation]:
+        citations: list[SourceCitation] = []
+        seen_urls: set[str] = set()
+        for card in cards:
+            if card.canonical_url in seen_urls:
+                continue
+            seen_urls.add(card.canonical_url)
+            citations.append(
+                SourceCitation(
+                    index=len(citations) + 1,
+                    card_id=card.card_id,
+                    title=card.source_title or card.title,
+                    url=card.canonical_url,
+                    locator=card.source_locator,
+                )
+            )
+            if len(citations) >= self.answer_max_sources:
+                break
+        return citations
 
     @staticmethod
     def _evidence_payload(card: CardEvidence) -> dict[str, Any]:

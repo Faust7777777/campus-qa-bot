@@ -5,6 +5,7 @@ import json
 import math
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -212,6 +213,9 @@ class RetrievalTrace:
     # so existing recall metrics still measure the reranker itself.
     selection_ids: list[str] = field(default_factory=list)
     selected_ids: list[str] = field(default_factory=list)
+    # Wall time per remote stage, so a slow answer can be attributed to the
+    # stage that caused it instead of being reported as one opaque total.
+    stage_seconds: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -534,6 +538,12 @@ class KnowledgeDatabase:
 # is the knob to revisit if the reranker is ever replaced by a calibrated one.
 RERANK_TIE_MARGIN = 0.05
 
+# When a question is answered by official entry points rather than by evidence,
+# offer the best few rather than a single arbitrary one.  A topic typically
+# spans several official pages, and the program attaches the links itself, so
+# there is no model in the loop that could confuse them.
+MAX_NAVIGATION_CARDS = 3
+
 
 class StrongRetriever:
     def __init__(
@@ -557,22 +567,29 @@ class StrongRetriever:
         history: list[dict[str, str]] | None = None,
     ) -> RetrievalResult:
         try:
+            stage_seconds: dict[str, float] = {}
             raw_plan: dict[str, Any] | None = None
             if self.fast_path_enabled:
                 from .query_fastpath import fast_query_plan
 
                 raw_plan = fast_query_plan(question, history)
             if raw_plan is None:
+                started = time.perf_counter()
                 raw_plan = await self.models.plan(question, history)
+                stage_seconds["planner"] = time.perf_counter() - started
             plan = QueryPlan.from_dict(raw_plan, question)
             if plan.intent == "out_of_scope":
                 raise InsufficientEvidence("out of scope")
             queries = list(dict.fromkeys([plan.standalone_query, *plan.subqueries]))
+            started = time.perf_counter()
             vectors = await self.models.embed(queries)
+            stage_seconds["embedding"] = time.perf_counter() - started
             if len(vectors) != len(queries):
                 raise RetrievalUnavailable("embedding", "query embedding count mismatch")
+            started = time.perf_counter()
             channels = await self.database.recall_channels(queries, vectors, plan)
-            trace = RetrievalTrace(channel_ids=channels)
+            stage_seconds["recall"] = time.perf_counter() - started
+            trace = RetrievalTrace(channel_ids=channels, stage_seconds=stage_seconds)
             first_stage = self._rrf(channels, 50)
             trace.first_stage_ids = first_stage
             card_map = self.database.load_cards(first_stage)
@@ -585,7 +602,9 @@ class StrongRetriever:
             if not rerank_ids:
                 raise InsufficientEvidence("no candidates")
             rerank_docs = [self._rerank_document(card_map[card_id]) for card_id in rerank_ids]
+            started = time.perf_counter()
             ranked = await self.models.rerank(plan.standalone_query, rerank_docs)
+            stage_seconds["reranker"] = time.perf_counter() - started
             if len(ranked) != len(rerank_ids):
                 raise RetrievalUnavailable("reranker", "returned incomplete ranking")
             ordered: list[CardEvidence] = []
@@ -646,13 +665,13 @@ class StrongRetriever:
                         break
                 if not selected:
                     if navigation_cards:
-                        selected = navigation_cards[:1]
+                        selected = navigation_cards[:MAX_NAVIGATION_CARDS]
                     else:
                         raise InsufficientEvidence(
                             f"required facets missing from any single source: {', '.join(last_missing)}"
                         )
             else:
-                selected = navigation_cards[:1]
+                selected = navigation_cards[:MAX_NAVIGATION_CARDS]
             parent_ids = list(
                 dict.fromkeys(card.parent_card_id for card in selected if card.parent_card_id)
             )

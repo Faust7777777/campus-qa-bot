@@ -16,10 +16,16 @@ class RerankCandidate(Protocol):
 class RerankCandidateAllocator:
     """Allocate a bounded, diverse reranker set from an ordered RRF pool."""
 
-    budget: int = 12
+    budget: int = 16
     max_sources_per_fact: int = 2
     reserve_alternate_slots: int = 1
-    reserve_navigation: bool = True
+    # Navigation cards are the overwhelming majority of the reachable knowledge
+    # base, so a single reserved slot handed the reranker one arbitrary entry
+    # point - whichever the first stage happened to rank highest - and no way to
+    # choose between entry points at all.  Several are kept instead, dropping
+    # repeats from one source so a source that published the same notice twice
+    # cannot spend the whole quota.
+    navigation_slots: int = 3
 
     def __post_init__(self) -> None:
         if self.budget <= 0:
@@ -28,6 +34,8 @@ class RerankCandidateAllocator:
             raise ValueError("max_sources_per_fact must be positive")
         if self.reserve_alternate_slots < 0:
             raise ValueError("reserved alternate slots cannot be negative")
+        if self.navigation_slots < 0:
+            raise ValueError("navigation slots cannot be negative")
 
     @staticmethod
     def _fact_identity(card: RerankCandidate) -> tuple[str, str, str]:
@@ -40,7 +48,8 @@ class RerankCandidateAllocator:
         ordered_ids: Sequence[str],
         cards: Mapping[str, RerankCandidate],
     ) -> list[str]:
-        navigation_id: str | None = None
+        navigation_ids: list[str] = []
+        navigation_sources: set[str] = set()
         primary: list[tuple[str, tuple[str, str, str], str]] = []
         alternates: dict[
             tuple[str, str, str], list[tuple[str, tuple[str, str, str], str]]
@@ -53,8 +62,12 @@ class RerankCandidateAllocator:
             if card is None:
                 raise ValueError(f"candidate card disappeared: {card_id}")
             if card.card_kind == "navigation":
-                if navigation_id is None:
-                    navigation_id = card_id
+                if (
+                    len(navigation_ids) < self.navigation_slots
+                    and card.source_id not in navigation_sources
+                ):
+                    navigation_sources.add(card.source_id)
+                    navigation_ids.append(card_id)
                 continue
             identity = self._fact_identity(card)
             source_fact = (identity, card.source_id)
@@ -68,10 +81,8 @@ class RerankCandidateAllocator:
                 primary_identities.add(identity)
                 primary.append(entry)
 
-        navigation_slots = int(
-            self.reserve_navigation and navigation_id is not None and self.budget > 0
-        )
-        fact_budget = self.budget - navigation_slots
+        reserved_navigation = min(len(navigation_ids), self.budget)
+        fact_budget = self.budget - reserved_navigation
         alternate_identities = [
             identity for _, identity, _ in primary if identity in alternates
         ]
@@ -111,7 +122,5 @@ class RerankCandidateAllocator:
             selected.append(card_id)
             selected_sources.setdefault(identity, set()).add(source_id)
 
-        if navigation_slots:
-            assert navigation_id is not None
-            selected.append(navigation_id)
+        selected.extend(navigation_ids[:reserved_navigation])
         return selected

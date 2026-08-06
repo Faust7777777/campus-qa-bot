@@ -14,8 +14,14 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 
 from ..attestation import ArtifactSnapshot
-from ..clients import MAX_EMBEDDING_BATCH_SIZE
-from ..contracts import ReviewStatus, ReviewedCard, json_dumps, normalized_text, utc_now
+from ..contracts import (
+    MAX_EMBEDDING_BATCH_SIZE,
+    ReviewStatus,
+    ReviewedCard,
+    json_dumps,
+    normalized_text,
+    utc_now,
+)
 from ..errors import BuildError, ContractError
 from ..scope_policy import parent_scope_covers_child
 from ..vector import load_sqlite_vec, serialize_float32

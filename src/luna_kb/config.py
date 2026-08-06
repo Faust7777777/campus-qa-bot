@@ -33,7 +33,7 @@ class Settings:
     fast_path_enabled: bool = True
     reranker_url: str = ""
     rerank_min_score: float = 0.35
-    request_timeout: float = 20.0
+    request_timeout: float = 8.0
     oom_score_adj: int = 500
     history_turns: int = 3
     history_ttl_seconds: float = 1800.0
@@ -47,7 +47,7 @@ class Settings:
     answer_cache_size: int = 256
     max_question_chars: int = 500
     answer_queue_timeout_seconds: float = 30.0
-    answer_total_timeout_seconds: float = 90.0
+    answer_total_timeout_seconds: float = 15.0
     allowed_group_ids: frozenset[int] = frozenset()
 
     @classmethod

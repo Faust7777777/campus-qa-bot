@@ -88,6 +88,11 @@ MOJIBAKE_SEQUENCES = (
 )
 MOJIBAKE_PUNCTUATION = ("锛", "銆", "鈥", "锝", "鈿")
 MAX_SEMANTIC_TEXT_CHARS = 16_000
+# Gateway batching limit.  It lives here rather than in clients.py so that the
+# offline builder does not have to import the runtime client layer for one
+# constant, which would drag the whole query-time module graph into the build
+# scope and make every retrieval change invalidate a knowledge build.
+MAX_EMBEDDING_BATCH_SIZE = 32
 
 
 def utc_now() -> str:

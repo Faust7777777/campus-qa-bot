@@ -9,7 +9,7 @@ import pytest
 from luna_kb.errors import BuildError
 from luna_kb.evaluation_policy import EvaluationThresholds, FORMAL_FACULTY_SET_SHA256
 from luna_kb.evaluation_ledger import case_ledger_sha256, summarize_case_ledger
-from luna_kb.clients import runtime_code_sha256
+from luna_kb.clients import build_code_sha256, runtime_code_sha256
 from luna_kb.release import ReleaseManager, file_sha256
 from luna_kb.vector import load_sqlite_vec, serialize_float32
 
@@ -26,6 +26,16 @@ MODEL_CONFIG = {
     "runtime_code_sha256": runtime_code_sha256(),
     "model_protocol_version": "extractive-evidence-v1",
     "max_model_response_bytes": 2 * 1024 * 1024,
+    "max_embedding_batch_size": 32,
+    "max_semantic_text_chars": 16_000,
+}
+# What build_report.json now carries: only what determines the database's
+# contents.  Query-time settings live in MODEL_CONFIG on the evaluation report.
+BUILD_CONFIG = {
+    "embedding": "embedding",
+    "embedding_dimension": 1024,
+    "endpoint_sha256": "d" * 64,
+    "build_code_sha256": build_code_sha256(),
     "max_embedding_batch_size": 32,
     "max_semantic_text_chars": 16_000,
 }
@@ -89,7 +99,7 @@ def make_release(tmp_path: Path) -> tuple[ReleaseManager, Path, dict]:
                 },
                 "review_status_counts": counts,
                 "reviewed_sha256": reviewed_sha256,
-                "model_config": MODEL_CONFIG,
+                "model_config": BUILD_CONFIG,
                 "faculty_cards": 0,
             }
         )
@@ -175,6 +185,7 @@ def passing_evaluation_report(manifest: dict) -> dict:
         "evaluation_set_sha256": "b" * 64,
         "faculty_set_sha256": FORMAL_FACULTY_SET_SHA256,
         "model_config": dict(MODEL_CONFIG),
+        "build_config": dict(BUILD_CONFIG),
         "thresholds": thresholds,
         "checks": {name: True for name in thresholds},
         "kind_counts": summary["kind_counts"],
@@ -262,6 +273,7 @@ def test_mark_evaluated_rejects_relaxed_thresholds(tmp_path: Path) -> None:
         "evaluation_set_sha256": "b" * 64,
         "faculty_set_sha256": FORMAL_FACULTY_SET_SHA256,
         "model_config": dict(MODEL_CONFIG),
+        "build_config": dict(BUILD_CONFIG),
         "thresholds": thresholds,
         "checks": {name: True for name in thresholds},
         "metrics": {"question_count": 300},
@@ -327,12 +339,26 @@ def test_mark_evaluated_rejects_a_summary_without_case_rows(tmp_path: Path) -> N
         manager.mark_evaluated("v1", report)
 
 
-def test_mark_evaluated_requires_the_database_build_model_config(tmp_path: Path) -> None:
+def test_mark_evaluated_requires_the_database_build_config(tmp_path: Path) -> None:
+    # An evaluation run against a different database build cannot certify this
+    # one, even though the runtime code matches.
     manager, _, manifest = make_release(tmp_path)
     report = passing_evaluation_report(manifest)
-    report["model_config"]["embedding"] = "different-embedding"
+    report["build_config"]["embedding"] = "different-embedding"
 
-    with pytest.raises(BuildError, match="differs from database build"):
+    with pytest.raises(BuildError, match="did not run against this database build"):
+        manager.mark_evaluated("v1", report)
+
+
+def test_mark_evaluated_still_requires_the_running_code_to_be_the_evaluated_code(
+    tmp_path: Path,
+) -> None:
+    # The safety invariant that survives the build/runtime split.
+    manager, _, manifest = make_release(tmp_path)
+    report = passing_evaluation_report(manifest)
+    report["model_config"]["runtime_code_sha256"] = "f" * 64
+
+    with pytest.raises(BuildError, match="current runtime code"):
         manager.mark_evaluated("v1", report)
 
 

@@ -145,6 +145,7 @@ async def replay(
         "pool_hit": 0,
         "allocator_hit": 0,
         "selected_hit": 0,
+        "top1_hit": 0,
         "refused": 0,
         "by_kind": {"fact": [0, 0], "navigation": [0, 0]},
         "misses": [],
@@ -169,6 +170,10 @@ async def replay(
         stats["allocator_hit"] += bool(gold & set(trace.fused_ids))
         selected = bool(gold & set(trace.selected_ids))
         stats["selected_hit"] += selected
+        # A navigation answer shows several entry points, so "gold is somewhere
+        # in the answer" gets easier as that list grows.  Track the strict
+        # version separately so the loose one cannot flatter a change.
+        stats["top1_hit"] += bool(trace.selected_ids) and trace.selected_ids[0] in gold
 
         if in_pool:
             gold_id = next(iter(gold & set(trace.first_stage_ids)))
@@ -195,7 +200,9 @@ def report(label: str, stats: dict[str, Any]) -> float:
         f" = {stats['allocator_hit'] / max(pool, 1):.1%}"
     )
     accuracy = stats["selected_hit"] / max(total, 1)
-    print(f"  gold SELECTED                       {stats['selected_hit']}/{total} = {accuracy:.1%}")
+    top1 = stats["top1_hit"] / max(total, 1)
+    print(f"  gold SELECTED (anywhere in answer)  {stats['selected_hit']}/{total} = {accuracy:.1%}")
+    print(f"  gold SELECTED FIRST (strict)        {stats['top1_hit']}/{total} = {top1:.1%}")
     if stats["refused"]:
         print(f"  refused (insufficient evidence)     {stats['refused']}")
     for kind, (hit, seen) in sorted(stats["by_kind"].items()):
