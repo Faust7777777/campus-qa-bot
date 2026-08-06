@@ -532,10 +532,17 @@ class KnowledgeDatabase:
 
 
 # How far two reranker scores must separate before that difference counts as a
-# real preference instead of banding noise.  The DLUT gateway's
-# ``Qwen3-Reranker-8B`` returned 0.911-0.929 across obviously unrelated
-# documents, so anything tighter than this collapses into a single tier.  This
-# is the knob to revisit if the reranker is ever replaced by a calibrated one.
+# real preference instead of banding noise.
+#
+# Measured against the DLUT gateway over ten real questions: the full spread
+# across 8-16 candidates is 0.08-0.22, but the top of each distribution is
+# tight - the leading candidates typically sit within 0.005-0.03 of each other,
+# which is where selection actually happens.  So the reranker separates the
+# plainly irrelevant tail well and the plausible head barely at all, and this
+# margin is set to match: near-equal leaders share a tier and are ordered by
+# first-stage rank, while the tail falls into lower tiers and stays there.
+#
+# Revisit if the reranker is ever replaced by a calibrated one.
 RERANK_TIE_MARGIN = 0.05
 
 # When a question is answered by official entry points rather than by evidence,
