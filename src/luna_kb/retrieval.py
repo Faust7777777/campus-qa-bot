@@ -784,6 +784,29 @@ class StrongRetriever:
 
     @staticmethod
     def _rerank_document(card: CardEvidence) -> str:
+        """Build the document the reranker scores.
+
+        Navigation cards carry no ``evidence_quote`` and no ``summary`` (0 of
+        3068 have one), so this is a bare title for them while a fact card gets
+        a whole paragraph.  That asymmetry looks like a handicap and has been
+        proposed as a fix more than once.  It was measured against the gateway
+        instead, same query and same candidate set, only the document changing:
+
+            navigation  n=18  mean length  34  mean score 0.9270
+            fact        n=43  mean length 190  mean score 0.8745
+            correlation(length, score) = -0.116
+
+        Navigation cards score *higher* while being far shorter, so the premise
+        is false - a bare title is a dense topical signal and a long excerpt
+        dilutes it.  Adding ``standard_question`` moved navigation scores by
+        -0.0117 on average and changed top-1 in 5 of 6 queries, helping twice
+        and hurting twice; adding ``retrieval_text`` was worse (-0.0182) and
+        would also require weakening the test that keeps Luna-generated text
+        out of ranking.  Neither is worth doing.
+
+        Keep this to audited fields with no generated expansion.
+        """
+
         return "\n".join(
             value
             for value in (card.source_title, card.title, card.evidence_quote)
