@@ -60,13 +60,23 @@ class MessageDecision:
 
 
 class MessagePolicy:
-    def __init__(self, allowed_group_ids: set[int]) -> None:
+    def __init__(
+        self,
+        allowed_group_ids: set[int],
+        allowed_user_ids: set[int] | None = None,
+    ) -> None:
         self.allowed_group_ids = frozenset(allowed_group_ids)
+        # Private messages are ignored unless the sender is listed.  Testing in
+        # a group means every wrong answer is public, so there has to be a way
+        # to try the bot without an audience - but only for named accounts, or
+        # anyone who finds the QQ number gets a private endpoint to it.
+        self.allowed_user_ids = frozenset(allowed_user_ids or ())
 
     def decide(self, message: InboundMessage) -> MessageDecision:
         if message.message_type != "group":
-            return MessageDecision(DecisionKind.IGNORE, "private_message")
-        if message.group_id not in self.allowed_group_ids:
+            if message.user_id not in self.allowed_user_ids:
+                return MessageDecision(DecisionKind.IGNORE, "private_message")
+        elif message.group_id not in self.allowed_group_ids:
             return MessageDecision(DecisionKind.IGNORE, "group_not_allowed")
         text = message.text.strip()
         if text.startswith("#"):

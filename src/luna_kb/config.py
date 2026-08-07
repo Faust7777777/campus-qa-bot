@@ -49,6 +49,7 @@ class Settings:
     answer_queue_timeout_seconds: float = 30.0
     answer_total_timeout_seconds: float = 15.0
     allowed_group_ids: frozenset[int] = frozenset()
+    allowed_user_ids: frozenset[int] = frozenset()
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -97,6 +98,11 @@ class Settings:
                 for value in _required("LUNA_ALLOWED_GROUP_IDS").split(",")
                 if value.strip()
             ),
+            allowed_user_ids=frozenset(
+                int(value.strip())
+                for value in os.getenv("LUNA_ALLOWED_USER_IDS", "").split(",")
+                if value.strip()
+            ),
         )
 
     def validate(self) -> None:
@@ -132,5 +138,5 @@ class Settings:
             raise ContractError("maximum question length must be positive")
         if self.answer_queue_timeout_seconds <= 0 or self.answer_total_timeout_seconds <= 0:
             raise ContractError("answer timeout limits must be positive")
-        if not self.allowed_group_ids:
-            raise ContractError("at least one allowed group id is required")
+        if not self.allowed_group_ids and not self.allowed_user_ids:
+            raise ContractError("at least one allowed group or user id is required")

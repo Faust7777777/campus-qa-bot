@@ -24,7 +24,9 @@ class AnswerEngine(Protocol):
 class CampusQaApplication:
     def __init__(self, answers: AnswerEngine | None, settings: Settings) -> None:
         self.answers = answers
-        self.policy = MessagePolicy(set(settings.allowed_group_ids))
+        self.policy = MessagePolicy(
+            set(settings.allowed_group_ids), set(settings.allowed_user_ids)
+        )
         self.history = ConversationStore(
             settings.history_turns,
             settings.history_ttl_seconds,
@@ -44,9 +46,10 @@ class CampusQaApplication:
             return None
         if len(decision.question) > self.max_question_chars:
             return f"问题过长，请精简到{self.max_question_chars}字以内。"
+        # (None, user_id) for a private chat, which is the key ConversationStore
+        # and the dedupe gate already expect - the policy has decided by now
+        # whether this sender may talk to the bot at all.
         key = (message.group_id, message.user_id)
-        if message.group_id is None:
-            return None
         admission = self.gate.admit(message.message_id, key)
         if not admission.accepted:
             return None
