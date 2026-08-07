@@ -81,23 +81,32 @@ async def _shutdown() -> None:
 
 @matcher.handle()
 async def _answer(bot: Bot, event: MessageEvent) -> None:
-    if application is None or not isinstance(event, GroupMessageEvent):
+    if application is None:
         return
     if str(event.user_id) == str(bot.self_id):
         return
+    # Private messages reach the policy, which decides whether this sender is
+    # allowed to use them.  Dropping them here meant LUNA_ALLOWED_USER_IDS could
+    # never take effect: the adapter discarded the event before any of it ran.
+    in_group = isinstance(event, GroupMessageEvent)
     response = await application.handle(
         InboundMessage(
             message_id=str(event.message_id),
-            message_type="group",
-            group_id=int(event.group_id),
+            message_type="group" if in_group else "private",
+            group_id=int(event.group_id) if in_group else None,
             user_id=int(event.user_id),
             text=event.get_plaintext(),
         )
     )
-    if response:
+    if not response:
+        return
+    if in_group:
+        # Quote and @ the asker, so an answer is readable in a busy group.
         reply = (
             MessageSegment.reply(event.message_id)
             + MessageSegment.at(event.user_id)
             + MessageSegment.text(f" {response}")
         )
-        await matcher.finish(reply)
+    else:
+        reply = MessageSegment.text(response)
+    await matcher.finish(reply)
