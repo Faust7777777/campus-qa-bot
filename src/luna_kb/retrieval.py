@@ -7,7 +7,7 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -15,6 +15,7 @@ from .candidate_allocation import RerankCandidateAllocator
 from .contracts import normalized_text
 from .errors import ContractError, InsufficientEvidence, RetrievalUnavailable
 from .pipeline.build import SCHEMA_VERSION, char_trigrams, lexical_tokens
+from .query_fastpath import lexical_query_plan
 from .scope_policy import matches_query_scope, parent_scope_covers_child
 from .vector import load_sqlite_vec, serialize_float32
 
@@ -134,10 +135,8 @@ class QueryPlan:
             raise ModelOutputRejected("planner", "query plan has too many or oversized entities")
         if len(facets) > 12 or any(len(value) > 100 for value in facets):
             raise ModelOutputRejected("planner", "query plan has too many or oversized facets")
-        if filters.time_scope not in {"current", "historical"}:
+        if filters.time_scope not in {"", "current", "historical"}:
             raise ModelOutputRejected("planner", "invalid time_scope")
-        if intent == "historical":
-            filters.time_scope = "historical"
         return cls(intent, standalone, subqueries, entities, facets, filters)
 
 
@@ -294,9 +293,18 @@ class KnowledgeDatabase:
     def _filter_sql(plan: QueryPlan, alias: str = "c") -> tuple[str, list[Any]]:
         clauses: list[str] = []
         params: list[Any] = []
+        # An empty time scope searches both, which is what a question asked in a
+        # group actually wants.  Whether the answer sits on a current card or a
+        # dated one is a property of the knowledge base, not of the question:
+        # "毕业离校后校园邮箱还能用多久" and "2025级新生有哪些绿色通道资助" read
+        # as ordinary present-tense questions and are answered by cards marked
+        # historical, because the notices behind them carry a year.  Asking the
+        # planner to predict that filtered 33 of 200 gold cards out of reach the
+        # moment it guessed wrong.  The selector is told which cards are dated
+        # and prefers current ones, which is a judgement it can actually make.
         if plan.filters.time_scope == "historical":
             clauses.append(f"{alias}.validity='historical'")
-        else:
+        elif plan.filters.time_scope == "current":
             clauses.append(f"{alias}.validity!='historical'")
         if plan.filters.campus:
             scopes = KnowledgeDatabase._matching_campus_scopes(plan.filters.campus)
@@ -404,7 +412,7 @@ class KnowledgeDatabase:
             params: list[Any] = [serialize_float32(vector), limit]
             if plan.filters.time_scope == "historical":
                 clauses.append("validity='historical'")
-            else:
+            elif plan.filters.time_scope == "current":
                 clauses.append("validity!='historical'")
             if plan.filters.campus:
                 scopes = self._matching_campus_scopes(plan.filters.campus)
@@ -556,6 +564,10 @@ def serves_another_audience(question: str) -> str | None:
 
 
 MAX_NAVIGATION_CARDS = 3
+# How many dated cards may ride along when both scopes are searched.  Small on
+# purpose: they outnumber current cards eight to one, so this is a way back to
+# an answer that only exists on a dated notice, not a share of the pool.
+DATED_RECALL_SLOTS = 8
 
 
 class StrongRetriever:
@@ -596,18 +608,32 @@ class StrongRetriever:
     ) -> RetrievalResult:
         try:
             stage_seconds: dict[str, float] = {}
-            raw_plan: dict[str, Any] | None = None
-            if self.fast_path_enabled:
-                from .query_fastpath import fast_query_plan
-
-                raw_plan = fast_query_plan(question, history)
-            if raw_plan is None:
+            # The planner is called for one thing: resolving what a follow-up
+            # refers to.  "那是谁能申请" has no subject, and only the previous
+            # turn supplies one.
+            #
+            # A single-turn question has nothing to resolve, so it takes the
+            # lexical plan and no model call at all.  That is not a cost saving
+            # dressed up as a design: on thirty colloquial single-turn questions
+            # the planner cited the right card 23 times and skipping it cited it
+            # 28, because its outputs are subtractive.  It rewrote 课选完了中途还
+            # 能反悔换掉吗 into 课程中途更换流程, which shares no term with the
+            # card that answers it; it read 以后 in 毕业以后邮箱还能用多久 as a
+            # question about the past and filtered out every current card; it
+            # normalised 能不能 into 能否 and tripped an audience gate the user's
+            # own words never would.  On eight multi-turn questions, where it
+            # does the job it is now kept for, it scored 8 against 7.
+            #
+            # Its rewrite is additive here - ``queries`` keeps the original
+            # wording alongside it - so a bad resolution can only add candidates
+            # the selector will pass over, never remove the answer.
+            if history:
                 started = time.perf_counter()
                 raw_plan = await self.models.plan(question, history)
                 stage_seconds["planner"] = time.perf_counter() - started
+            else:
+                raw_plan = lexical_query_plan(question)
             plan = QueryPlan.from_dict(raw_plan, question)
-            if plan.intent == "out_of_scope":
-                raise InsufficientEvidence("out of scope")
             # The knowledge base is undergraduate-only, and the topic gate cannot
             # see this: a graduate scholarship question reads as highly on-topic
             # against the undergraduate scholarship cards, and answering it from
@@ -615,7 +641,20 @@ class StrongRetriever:
             other = serves_another_audience(plan.standalone_query)
             if other:
                 raise InsufficientEvidence(f"serves {other}, not undergraduates")
-            queries = list(dict.fromkeys([plan.standalone_query, *plan.subqueries]))
+            # The words the user actually typed always search, alongside the
+            # planner's rewrite rather than replaced by it.
+            #
+            # The rewrite is a guess at what the question means, and when it
+            # guesses wrong it takes the question's vocabulary with it: "课选完
+            # 了中途还能反悔换掉吗" became "课程中途更换流程", which shares no
+            # term with the card that answers it (补退选 / 退课 / 选课结果).
+            # That card is rank 1 on the original wording and absent from the
+            # pool on the rewrite.  Adding rather than replacing costs one more
+            # query against three lexical channels and cannot lose a card,
+            # because recall is a union.
+            queries = list(
+                dict.fromkeys([question, plan.standalone_query, *plan.subqueries])
+            )
             vectors: list[list[float]] = []
             if self.vector_recall_enabled:
                 started = time.perf_counter()
@@ -624,7 +663,15 @@ class StrongRetriever:
                 if len(vectors) != len(queries):
                     raise RetrievalUnavailable("embedding", "query embedding count mismatch")
             started = time.perf_counter()
-            channels = await self.database.recall_channels(queries, vectors, plan)
+            # An empty scope means "current cards on the full budget, dated ones
+            # on an annex" - never one undifferentiated search, because dated
+            # cards outnumber current ones eight to one and would take the pool.
+            main_plan = (
+                replace(plan, filters=replace(plan.filters, time_scope="current"))
+                if plan.filters.time_scope == ""
+                else plan
+            )
+            channels = await self.database.recall_channels(queries, vectors, main_plan)
             stage_seconds["recall"] = time.perf_counter() - started
             trace = RetrievalTrace(
                 channel_ids={
@@ -637,13 +684,50 @@ class StrongRetriever:
                 stage_seconds=stage_seconds,
             )
             first_stage = self._rrf(channels, 50)
-            trace.first_stage_ids = first_stage
-            card_map = self.database.load_cards(first_stage)
-            for first_stage_rank, card_id in enumerate(first_stage, 1):
+            # Dated cards get a small annex rather than the run of the pool.
+            #
+            # 2,879 of this knowledge base's 3,251 cards are historical, so
+            # searching both scopes together lets stale notices crowd out the
+            # current ones: "奖学金咋申请啊" came back with a pool that was 84%
+            # historical, the selector was told to prefer current cards, found
+            # none worth citing among the eight that survived, and declined the
+            # most basic question the bot exists to answer.  Recalling current
+            # cards on the full budget and appending a bounded number of dated
+            # ones keeps a question whose only answer carries a year reachable,
+            # without letting last year's notices displace this year's.
+            dated: list[str] = []
+            if plan.filters.time_scope == "":
+                dated_plan = replace(
+                    plan, filters=replace(plan.filters, time_scope="historical")
+                )
+                dated = [
+                    card_id
+                    for card_id in self._rrf(
+                        await self.database.recall_channels(queries, vectors, dated_plan),
+                        DATED_RECALL_SLOTS,
+                    )
+                    if card_id not in set(first_stage)
+                ]
+            trace.first_stage_ids = [*first_stage, *dated]
+            card_map = self.database.load_cards(trace.first_stage_ids)
+            for first_stage_rank, card_id in enumerate(trace.first_stage_ids, 1):
                 card = card_map.get(card_id)
                 if card is not None:
                     card.first_stage_rank = first_stage_rank
+            # The annex is allocated on its own rather than queued behind the
+            # current pool.  Appended, its cards sat at pool position 51 and lost
+            # every quota race the allocator runs - one navigation card per
+            # source, a bounded navigation count - so all eight dated gold cards
+            # reached the pool and none survived allocation.  A reserved lane is
+            # the whole point of an annex.
             rerank_ids = self.candidate_allocator.allocate(first_stage, card_map)
+            if dated:
+                already = set(rerank_ids)
+                rerank_ids = rerank_ids + [
+                    card_id
+                    for card_id in self.candidate_allocator.allocate(dated, card_map)
+                    if card_id not in already
+                ]
             trace.fused_ids = rerank_ids
             if not rerank_ids:
                 raise InsufficientEvidence("no candidates")
@@ -696,17 +780,24 @@ class StrongRetriever:
             if not ordered:
                 raise InsufficientEvidence("no candidate answers this question")
             # The selector's first pick decides what kind of answer this is, and
-            # the rest of the pick has to agree with it.  A mixed selection would
+            # the rest of the pick has to agree with it: a mixed selection would
             # cite a navigation card carrying no text beside a fact card that
-            # does, and mixing sources would attribute one page's rules to
-            # another's URL - so the leader's kind, and for evidence answers the
-            # leader's source, filter the rest.  Ordering is the model's, which
-            # is the point: a ranker cannot be trusted to lead, but a reader can.
+            # does, and the answer model cannot tell the reader which of the two
+            # its sentence came from.
+            #
+            # Kind is the only thing filtered.  Requiring one source as well was
+            # tried and measured wrong: asked whether a student in financial
+            # difficulty qualifies for a loan, the selector picked 国家助学贷款政
+            # 策与申请条件 and 国家助学贷款申请条件 together and said why - "these
+            # two list the conditions, this one adds the process" - and the
+            # same-source rule threw away two thirds of a deliberate choice.
+            # That rule belonged to the ranker it replaced: a ranker cannot read,
+            # so joining two sources it merely scored highly was a real risk.  A
+            # reader that quotes both has judged that they belong together, and
+            # each cited card still carries its own URL.
             leader = ordered[0]
             if leader.card_kind == "fact" and leader.evidence_quote:
-                selected = [
-                    card for card in fact_cards if card.source_id == leader.source_id
-                ][:4]
+                selected = fact_cards[:4]
             else:
                 selected = navigation_cards[:MAX_NAVIGATION_CARDS]
             if not selected:
@@ -766,7 +857,8 @@ class StrongRetriever:
         """
 
         body = card.evidence_quote or card.summary or "（无正文，仅为官方入口链接）"
-        return f"【{card.title}】{body}"
+        dated = "【往年通知】" if card.validity == "historical" else ""
+        return f"{dated}【{card.title}】{body}"
 
     @staticmethod
     def _picked_cards(

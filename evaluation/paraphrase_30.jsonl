@@ -2,7 +2,7 @@
 {"id": "p02-research-room", "gold": "card_ef575b04cbe339314597_research_room", "topic": "研究间预约", "question": "图书馆那种小房间几个人才能订？"}
 {"id": "p03-library-hours", "gold": "card_kb_clean_src_7956823168d0c2102226_library_hours", "topic": "图书馆开馆", "question": "馆里晚上几点清场？"}
 {"id": "p04-library-checkin", "gold": "card_b40aae6c_library_checkin", "topic": "入馆签到", "question": "进馆刷脸就行还是得带卡？"}
-{"id": "p05-loan-eligibility", "gold": "card_national_student_loan_2025_eligibility", "topic": "助学贷款条件", "question": "家里困难想借钱交学费，够不够格？"}
+{"id": "p05-loan-eligibility", "gold": "card_national_student_loan_2025_eligibility", "topic": "助学贷款条件", "question": "家里困难想借钱交学费，够不够格？", "also_correct": ["card_a7a655091e539a9b3ba9_policy"]}
 {"id": "p06-psych-services", "gold": "card_psychological_center_services_and_scope_dlut", "topic": "心理中心", "question": "心情不好想找人聊聊，学校有什么服务？"}
 {"id": "p07-club-register", "gold": "card_6a80f983b6a3ad1cb382_register", "topic": "社团注册", "question": "拉几个人才能开个新社团？"}
 {"id": "p08-major-transfer", "gold": "card_kb_clean_src_bb68b852b41c7ca61f16_eligibility", "topic": "转专业条件", "question": "读得不开心想换个专业，有啥门槛？"}

@@ -98,7 +98,11 @@ def test_allocator_keeps_an_alternate_when_unique_facts_saturate_the_budget() ->
         "strong-deadline": _evidence("strong-deadline", "scholarship", "deadline"),
     }
 
-    allocated = RerankCandidateAllocator().allocate(list(cards), cards)
+    # A saturation test states the budget it saturates.  The default is 50 now
+    # that the selector reads the whole pool in one call, which no longer
+    # saturates on sixteen cards - but the reservation logic being pinned here
+    # still governs whenever a pool is larger than the budget.
+    allocated = RerankCandidateAllocator(budget=16).allocate(list(cards), cards)
 
     assert len(allocated) == 16
     assert allocated[0] == "weak-deadline"
@@ -142,7 +146,7 @@ def test_allocator_reserves_several_navigation_slots_without_growing_budget() ->
         navigation.source_id = source_id
         cards[card_id] = navigation
 
-    allocated = RerankCandidateAllocator().allocate(list(cards), cards)
+    allocated = RerankCandidateAllocator(budget=16).allocate(list(cards), cards)
 
     assert len(allocated) == 16
     assert [card_id for card_id in allocated if card_id.startswith("nav-")] == [

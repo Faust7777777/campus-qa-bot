@@ -163,12 +163,12 @@ class NavigationOnlyModels(LongAnswerModels):
 
 class CacheableAnswerModels(LongAnswerModels):
     def __init__(self) -> None:
-        self.plan_calls = 0
+        self.select_calls = 0
         self.answer_calls = 0
 
-    async def plan(self, question: str, history=None) -> dict:
-        self.plan_calls += 1
-        return await super().plan(question, history)
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        self.select_calls += 1
+        return await super().select_evidence(question, candidates)
 
     async def draft_answer(self, question: str, evidence: list[dict]) -> dict:
         self.answer_calls += 1
@@ -299,7 +299,7 @@ async def test_draft_mode_only_rejects_generated_links(
 
 
 @pytest.mark.asyncio
-async def test_answer_uses_only_one_source_end_to_end(
+async def test_every_citation_carries_its_own_cards_url(
     tmp_path: Path,
     make_approved_card: Callable[..., ReviewedCard],
 ) -> None:
@@ -329,10 +329,16 @@ async def test_answer_uses_only_one_source_end_to_end(
     try:
         result = await service.ask("奖学金怎么申请")
 
-        assert len(result.sources) == 1
+        # Evidence may now span sources: the selector reads the text and
+        # sometimes two pages genuinely answer together, where the ranker it
+        # replaced could only have been guessing.  What must not happen is one
+        # page's content going out under another page's link, so the invariant
+        # pinned here is per-citation rather than per-answer.
+        assert len({card.source_id for card in result.retrieval.cards}) == 2
         assert len(result.cited_card_ids) == 1
-        assert len({card.source_id for card in result.retrieval.cards}) == 1
-        assert result.sources[0].url == result.retrieval.cards[0].canonical_url
+        cited = {card.card_id: card for card in result.retrieval.cards}
+        assert len(result.sources) == 1
+        assert result.sources[0].url == cited[result.cited_card_ids[0]].canonical_url
     finally:
         database.close()
 
@@ -384,7 +390,7 @@ async def test_repeated_context_free_question_uses_answer_cache(
         second = await service.ask("奖学金怎么申请", history=[])
 
         assert second is first
-        assert models.plan_calls == 1
+        assert models.select_calls == 1
         assert models.answer_calls == 1
     finally:
         await service.close()
@@ -446,7 +452,7 @@ async def test_concurrent_identical_questions_share_one_inflight_answer(
         first_result, second_result = await asyncio.gather(first, second)
 
         assert second_result is first_result
-        assert models.plan_calls == 1
+        assert models.select_calls == 1
         assert models.answer_calls == 1
     finally:
         await service.close()

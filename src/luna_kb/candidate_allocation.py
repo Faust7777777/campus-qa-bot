@@ -16,7 +16,17 @@ class RerankCandidate(Protocol):
 class RerankCandidateAllocator:
     """Allocate a bounded, diverse reranker set from an ordered RRF pool."""
 
-    budget: int = 16
+    # Sized for the reranker, which scored every candidate on every call, so a
+    # tight budget was what kept latency and cost down.  The selector replaced
+    # it and reads the pool in one call, where sixteen candidates are about
+    # 4,700 characters and fifty are about 13,000 - cheap either way.  So the
+    # budget now costs almost nothing and was still discarding answers: asked
+    # what services exist for someone feeling low, the card that answers it sat
+    # at first-stage rank 26 and was cut before the selector ever saw it.
+    # Must clear the first-stage pool (50) plus the dated annex (8), or the
+    # annex is recalled and then cut back off, which measured as eight gold
+    # cards reaching the pool and not surviving allocation.
+    budget: int = 60
     max_sources_per_fact: int = 2
     reserve_alternate_slots: int = 1
     # Navigation cards are the overwhelming majority of the reachable knowledge

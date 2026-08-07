@@ -1,0 +1,8 @@
+{"id": "m1-research-room", "topic": "研究间预约", "gold": "card_ef575b04cbe339314597_research_room", "history": [["图书馆几点关门？", "自2025年5月8日起，伯川图书馆开馆时间为7:00至22:00。"]], "question": "那要几个人才能订？"}
+{"id": "m2-workstudy-who", "topic": "勤工助学对象", "gold": "card_3fc4cc20_qgzx_eligibility", "history": [["校内打工一周最多几个小时？", "学生参加勤工助学的时间原则上每周不超过8小时，每月不超过40小时。"]], "question": "那是谁能申请？"}
+{"id": "m3-hukou-where", "topic": "户口办理地点", "gold": "card_ff0dda185a24ae5f0197_process", "history": [["毕业要把户口迁走得带哪些东西？", "需提供身份证、毕业证原件及复印件等材料，具体以办理窗口要求为准。"]], "question": "在哪办？什么时间？"}
+{"id": "m4-second-degree-fee", "topic": "第二学位缴费", "gold": "card_second_degree_2026_fees", "history": [["第二学位新生什么时候报到？", "新生持录取通知书、身份证等证件于8月30日到校报到。"]], "question": "学费怎么交？"}
+{"id": "m5-psych-booking", "topic": "心理预约", "gold": "card_80e1b0c13d72f9e4918a_psychological_consultation_booking", "history": [["学校有心理咨询服务吗？", "心理健康教育与咨询中心面向全校学生开展心理咨询、团体辅导、心理讲座等工作。"]], "question": "在哪预约？"}
+{"id": "m6-network-fault", "topic": "校园网排障", "gold": "card_kb_clean_src_728b45d515c0974daf42_network_fault", "history": [["刚来学校，上网的账号密码是啥？", "新生入学后自动开通校园网账号，账号为学号，密码为统一身份认证密码。"]], "question": "连上了但打不开网页呢？"}
+{"id": "m7-club-charter", "topic": "社团章程", "gold": "card_ad6f0eb5e2812539a73e_student_club_charter_contents", "history": [["拉几个人才能开个新社团？", "申请成立学生社团须有20名及以上本校在读学生联合发起。"]], "question": "那它的章程里要写啥？"}
+{"id": "m8-transfer-credit", "topic": "转专业学分", "gold": "card_panjin_major_transfer_credit_recognition_2025", "history": [["读得不开心想换个专业，有啥门槛？", "2023级、2024级普通全日制在籍本科生可申请转专业，不含第二学士学位学生。"]], "question": "那原来修的学分怎么算？"}

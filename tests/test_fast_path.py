@@ -38,6 +38,9 @@ async def test_retriever_can_skip_planner_for_a_simple_question(tmp_path: Path, 
         result = await StrongRetriever(
             database, NoPlannerModels(), fast_path_enabled=True
         ).retrieve("奖学金怎么申请")
-        assert result.plan.intent == "procedure"
+        # The lexical plan does not classify intent; NoPlannerModels.plan
+        # raising is what proves no model was consulted.
+        assert result.plan.intent == "fact"
+        assert result.plan.standalone_query == "奖学金怎么申请"
     finally:
         database.close()
