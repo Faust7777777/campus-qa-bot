@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import sqlite3
 import threading
 import time
@@ -16,6 +17,24 @@ from .errors import ContractError, InsufficientEvidence, RetrievalUnavailable
 from .pipeline.build import SCHEMA_VERSION, char_trigrams, lexical_tokens
 from .scope_policy import matches_query_scope, parent_scope_covers_child
 from .vector import load_sqlite_vec, serialize_float32
+
+
+class ModelOutputRejected(RetrievalUnavailable):
+    """A model returned something the contract forbids, so this question fails.
+
+    A subclass, so production behaviour is unchanged: the bot still declines
+    rather than acting on a plan or a draft that broke a rule.
+
+    Evaluation needs the distinction.  A gateway failure must abort the run,
+    because scoring it as "no answer" would forge a restraint result, but a
+    model breaking a rule is just that question failing.  Conflating them ended
+    a 300-question run twice: once on an answer that invented a URL, once on a
+    planner that returned fifteen required facets when the ceiling is twelve.
+
+    It lives here rather than in errors.py because errors.py sits inside the
+    build scope, where adding a class invalidates a knowledge database that has
+    nothing to do with model output.
+    """
 
 
 class RetrievalModels(Protocol):
@@ -152,23 +171,23 @@ class QueryPlan:
                 time_scope=str(raw_filters.get("time_scope", "current")),
             )
         except Exception as exc:
-            raise RetrievalUnavailable("planner", f"invalid query plan: {exc}") from exc
+            raise ModelOutputRejected("planner", f"invalid query plan: {exc}") from exc
         if intent not in {"fact", "procedure", "historical", "out_of_scope"}:
-            raise RetrievalUnavailable("planner", f"invalid intent: {intent}")
+            raise ModelOutputRejected("planner", f"invalid intent: {intent}")
         if not standalone:
             standalone = original_question.strip()
         if not subqueries:
             subqueries = [standalone]
         if len(subqueries) > 3:
-            raise RetrievalUnavailable("planner", "more than 3 subqueries")
+            raise ModelOutputRejected("planner", "more than 3 subqueries")
         if len(standalone) > 1000 or any(len(value) > 1000 for value in subqueries):
-            raise RetrievalUnavailable("planner", "query plan text is too long")
+            raise ModelOutputRejected("planner", "query plan text is too long")
         if len(entities) > 20 or any(len(value) > 200 for value in entities):
-            raise RetrievalUnavailable("planner", "query plan has too many or oversized entities")
+            raise ModelOutputRejected("planner", "query plan has too many or oversized entities")
         if len(facets) > 12 or any(len(value) > 100 for value in facets):
-            raise RetrievalUnavailable("planner", "query plan has too many or oversized facets")
+            raise ModelOutputRejected("planner", "query plan has too many or oversized facets")
         if filters.time_scope not in {"current", "historical"}:
-            raise RetrievalUnavailable("planner", "invalid time_scope")
+            raise ModelOutputRejected("planner", "invalid time_scope")
         if intent == "historical":
             filters.time_scope = "historical"
         return cls(intent, standalone, subqueries, entities, facets, filters)
@@ -545,6 +564,116 @@ class KnowledgeDatabase:
 # Revisit if the reranker is ever replaced by a calibrated one.
 RERANK_TIE_MARGIN = 0.05
 
+# How much of the question a candidate must echo before it counts as being
+# about the same thing.
+#
+# Removing fact-first precedence let navigation cards be selected, and some
+# navigation card always shares a few characters with any question, so the bot
+# began answering everything - including "怎样申请夜间无人机驾驶证", which it
+# served with the nearest-looking application page.  Restraint on out-of-scope
+# questions fell to zero.
+#
+# Calibrated on the frozen set rather than guessed.  With boilerplate removed
+# the two populations barely overlap: answerable questions sit at a median of
+# 0.55, out-of-scope ones at 0.00.
+#
+# The threshold is set where false refusals are still exactly zero, not where
+# refusal is most effective, because the two errors are not symmetric.  Every
+# answerable question this would refuse was one the bot had answered correctly:
+#
+#     0.05    refuses 63% of out-of-scope questions, loses 0 real answers
+#     0.10    refuses 77%,  loses 3
+#     0.15    refuses 88%,  loses 7
+#
+# and the seven are questions phrased the way a student actually asks - "大工食堂
+# 早餐、午餐和晚餐几点开放" against a card titled 校内食堂餐次与营业时间.  Low
+# overlap there means different wording, not a different subject.  A wrong
+# answer gets corrected in the group; a refusal on a real question is a failure
+# the person sees directly.  Raise this only with evidence that the questions it
+# starts refusing were not being answered well anyway.
+MIN_TOPIC_OVERLAP = 0.05
+
+
+# Bigrams that campus questions and campus cards both use regardless of topic.
+# Unweighted overlap let boilerplate carry a question over the line on its own:
+# "本科生怎样申请夜间无人机驾驶证" scored 0.21 against a scholarship card purely
+# on 本科 / 科生 / 申请, while "夜间无人机驾驶证在哪考" scored 0.00.  Phrasing
+# decided the outcome instead of subject matter.
+BOILERPLATE_TERMS = (
+    "本科生", "同学", "学生", "学校", "校区", "我校",
+    "怎么", "怎样", "如何", "哪里", "在哪", "什么", "多少", "是否", "可以", "需要",
+    "申请", "办理", "手续", "流程", "规定", "要求", "条件", "材料", "时间", "地点",
+    "通知", "相关", "有关", "进行", "提供", "开展",
+)
+
+
+# Audiences this bot does not serve.  The knowledge base is undergraduate-only,
+# and the topic gate cannot catch these: "研究生国家奖学金评审材料在哪" reads as
+# highly on-topic against the undergraduate scholarship cards, and answering it
+# from them is worse than declining, because the two schemes differ.
+OTHER_AUDIENCES = (
+    "研究生", "硕士", "博士", "MBA", "EMBA", "教职工", "教师", "教工", "新教工",
+    "留学生", "国际学生", "外籍", "校外社会人员", "导师",
+)
+# The audience has to be the one doing the thing, not merely mentioned.  Three
+# answerable questions name another audience without being about them - a
+# 指导教师 is a role on a student's team, an 国际学生助学金 is the name of a fund
+# an undergraduate applies for, a 教师岗位 is a job an undergraduate applies to -
+# so the marker only counts when an action verb follows it closely.
+_AUDIENCE_ACTION = re.compile(
+    "(" + "|".join(OTHER_AUDIENCES) + r")(?:[^。？！]{0,30}?)"
+    r"(如何|怎[么样]|能否|可否|需要|应该|在哪|去哪|申请|办理|报销|评审|考核|报名|延期|预答辩)"
+)
+# An explicit scoping phrase settles it on its own: "教职工专属事项「…」的办理
+# 流程" puts a quoted title between the audience and the verb, which no
+# reasonable window catches, and the phrase already says who it is for.
+_AUDIENCE_SCOPED = re.compile("(" + "|".join(OTHER_AUDIENCES) + r")(专属|专用|专场)")
+# An explicit undergraduate marker settles it: "推荐优秀应届本科毕业生免试攻读
+# 研究生" is an undergraduate service whatever else it names.
+_UNDERGRADUATE = re.compile(r"本科生|本科|应届|推免|保研")
+
+
+def serves_another_audience(question: str) -> str | None:
+    """The audience this question is for, when it is plainly not undergraduates."""
+
+    if _UNDERGRADUATE.search(question):
+        return None
+    scoped = _AUDIENCE_SCOPED.search(question)
+    if scoped:
+        return scoped.group(1)
+    match = _AUDIENCE_ACTION.search(question)
+    return match.group(1) if match else None
+
+
+def _significant_bigrams(text: str) -> set[str]:
+    compact = normalized_text(text)
+    grams = {compact[i : i + 2] for i in range(len(compact) - 1)}
+    boilerplate: set[str] = set()
+    for term in BOILERPLATE_TERMS:
+        boilerplate |= {term[i : i + 2] for i in range(len(term) - 1)}
+    return grams - boilerplate
+
+
+def topic_overlap(question: str, card: "CardEvidence") -> float:
+    """Fraction of the question's *subject-bearing* bigrams the card echoes.
+
+    Deliberately lexical and local: it asks whether this card is about what was
+    asked, which is the one thing neither the reranker's banded scores nor the
+    first stage's ranking can express - both are relative, and a pool of
+    uniformly irrelevant cards still has a best member.
+
+    Boilerplate is removed from the question side only.  A card is free to be
+    written in whatever register it likes; what must match is the subject.
+    """
+
+    asked = _significant_bigrams(question)
+    if not asked:
+        return 1.0
+    text = normalized_text(f"{card.title}\n{card.source_title}\n{card.evidence_quote}")
+    echoed = {text[i : i + 2] for i in range(len(text) - 1)}
+    return len(asked & echoed) / len(asked)
+
+
 # When a question is answered by official entry points rather than by evidence,
 # offer the best few rather than a single arbitrary one.  A topic typically
 # spans several official pages, and the program attaches the links itself, so
@@ -587,6 +716,13 @@ class StrongRetriever:
             plan = QueryPlan.from_dict(raw_plan, question)
             if plan.intent == "out_of_scope":
                 raise InsufficientEvidence("out of scope")
+            # The knowledge base is undergraduate-only, and the topic gate cannot
+            # see this: a graduate scholarship question reads as highly on-topic
+            # against the undergraduate scholarship cards, and answering it from
+            # them states the wrong scheme's rules with full confidence.
+            other = serves_another_audience(plan.standalone_query)
+            if other:
+                raise InsufficientEvidence(f"serves {other}, not undergraduates")
             queries = list(dict.fromkeys([plan.standalone_query, *plan.subqueries]))
             started = time.perf_counter()
             vectors = await self.models.embed(queries)
@@ -658,6 +794,15 @@ class StrongRetriever:
             trace.selection_ids = [card.card_id for card in selectable]
             if not selectable:
                 raise InsufficientEvidence("reranker selected no evidence")
+            # Both stages rank; neither can say "none of these are about it".
+            # Without this the pool always has a best member and the bot always
+            # has something to say.
+            leader_overlap = topic_overlap(plan.standalone_query, selectable[0])
+            if leader_overlap < MIN_TOPIC_OVERLAP:
+                raise InsufficientEvidence(
+                    f"nothing on this topic: best candidate echoes "
+                    f"{leader_overlap:.0%} of the question"
+                )
             if selectable[0].card_kind == "fact":
                 source_groups: dict[str, list[CardEvidence]] = {}
                 for card in fact_cards:

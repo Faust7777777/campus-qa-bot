@@ -238,7 +238,9 @@ async def test_post_retries_gateway_rate_limit_once(monkeypatch: pytest.MonkeyPa
 
     assert vectors == [[1.0, 0.0]]
     assert calls == 2
-    assert sleeps == [0.5]
+    # The server asked for 0.5s; the floor raises it, so the hint is honoured
+    # in direction but never below the policy's own minimum.
+    assert sleeps == [max(0.5, ONLINE_RETRY_POLICY.base_delay_seconds)]
 
 
 @pytest.mark.asyncio
@@ -315,16 +317,19 @@ async def test_healthcheck_probes_all_four_model_contracts() -> None:
     assert called_models == ["embedding", "reranker", "planner", "answer"]
 
 
-def test_online_retry_policy_fails_fast() -> None:
-    # Someone in the group is waiting; the old budget could sleep 60s.
+def test_online_retry_policy_outlasts_a_throttle_window_but_stays_bounded() -> None:
+    # The gateway limits total requests across all of its endpoints, and one
+    # question spends three or four.  A 1.5s budget put all three attempts
+    # inside the same window, so every retry failed for the same reason and the
+    # question died at 2.3s.  It now spans long enough for the window to pass.
     policy = ONLINE_RETRY_POLICY
-    assert [policy.delay(attempt) for attempt in range(3)] == [0.5, 1.0, 2.0]
     total = sum(policy.delay(attempt) for attempt in range(policy.max_retries))
-    assert total <= 2.0
-    # A gateway cannot hold a group question open by asking for a long wait.
-    assert policy.delay(0, "600") == 4.0
-    assert policy.delay(0, "0.01") == 0.5
-    assert policy.delay(0, "not-a-number") == 0.5
+    assert total >= 5.0, "must outlast the observed throttle window"
+    # Still bounded: someone in the group is waiting, and the old 60s budget is
+    # what produced the 48-second tail.
+    assert total <= 20.0
+    assert policy.delay(0, "600") == policy.max_delay_seconds
+    assert policy.delay(0, "0.01") == policy.base_delay_seconds
 
 
 def test_offline_retry_policy_is_patient_enough_to_finish_a_build() -> None:
@@ -368,7 +373,7 @@ async def test_post_retries_a_dropped_connection_like_a_gateway_error(
         await client.aclose()
 
     assert attempts == 2
-    assert sleeps == [0.5]
+    assert sleeps == [ONLINE_RETRY_POLICY.base_delay_seconds]
     assert vectors == [[0.1, 0.2, 0.3]]
 
 

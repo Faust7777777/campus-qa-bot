@@ -66,12 +66,32 @@ PROMO = re.compile(
 WRONG_AUDIENCE = re.compile(r"MPA|EMBA|在职|教工|教职工|新教工|[（(]研究生[）)]|研究生赴|博士生")
 
 
+def best_topic(blob: str, query: str) -> str | None:
+    """Which gap a piece of text actually serves, which need not be the query
+    that matched it.
+
+    Used when labelling a card that has already been fetched, where assigning
+    the right topic beats discarding it.  Deliberately NOT used by ``score``:
+    letting a lead qualify under any topic measured at 92% precision against
+    100% for the strict per-query check, and buying one extra good source with
+    three bad ones is the wrong trade when a bad source becomes a card that
+    answers confidently and wrongly.
+    """
+
+    if any(anchor in blob for anchor in TOPIC_ANCHORS.get(query, [])):
+        return query
+    for topic, anchors in TOPIC_ANCHORS.items():
+        if any(anchor in blob for anchor in anchors):
+            return topic
+    return None
+
+
 def score(query: str, title: str, desc: str) -> tuple[bool, str]:
     blob = f"{title}\n{desc}"
     if WRONG_AUDIENCE.search(title):
         return False, "服务对象不是本科生"
     anchors = TOPIC_ANCHORS.get(query, [])
-    if anchors and not any(a in blob for a in anchors):
+    if anchors and not any(anchor in blob for anchor in anchors):
         return False, "正文/摘要里没有该事项的具体说法"
     # A WeChat headline is clickbait by convention, so promotional shape only
     # disqualifies when the body does not actually deliver the topic: the

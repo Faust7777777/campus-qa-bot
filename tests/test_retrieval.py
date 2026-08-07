@@ -11,12 +11,15 @@ from luna_kb.contracts import ReviewStatus, ReviewedCard, content_digest
 from luna_kb.errors import InsufficientEvidence, RetrievalUnavailable
 from luna_kb.pipeline.build import build_database
 from luna_kb.retrieval import (
+    MIN_TOPIC_OVERLAP,
     CardEvidence,
     KnowledgeDatabase,
     QueryFilters,
     QueryPlan,
     StrongRetriever,
     missing_required_facets,
+    serves_another_audience,
+    topic_overlap,
 )
 from luna_kb.vector import load_sqlite_vec
 
@@ -820,3 +823,76 @@ def test_rerank_tiers_still_let_a_confident_reranker_win() -> None:
     assert tiers == {"confident": 1, "rejected": 2}
     ordered = StrongRetriever._rank_fused(cards, tiers, pool_size=50)
     assert [card.card_id for card in ordered] == ["confident", "rejected"]
+
+
+def test_topic_overlap_separates_a_matching_card_from_an_unrelated_one() -> None:
+    # The gate that stopped the bot answering "怎样申请夜间无人机驾驶证" with the
+    # nearest-looking application page.  Neither stage can express "none of
+    # these are about it": both rank, and a pool of uniformly irrelevant cards
+    # still has a best member.
+    card = _evidence("scholarship", "scholarship", "apply")
+    card.title = "本科生专项奖学金申请办理"
+    card.source_title = "本科生专项奖学金申请办理"
+    card.evidence_quote = ""
+
+    assert topic_overlap("奖学金怎么申请", card) >= MIN_TOPIC_OVERLAP
+    assert topic_overlap("夜间无人机驾驶证怎么办理", card) < MIN_TOPIC_OVERLAP
+
+
+def test_boilerplate_alone_cannot_carry_a_question_over_the_line() -> None:
+    # Campus questions and campus cards share a register - 本科生 / 申请 / 办理 -
+    # and unweighted overlap let that shared register decide the outcome:
+    # "本科生怎样申请夜间无人机驾驶证" scored 0.21 against a scholarship card
+    # purely on phrasing, while the same question without the boilerplate
+    # scored 0.00.  Subject matter has to carry it, not register.
+    card = _evidence("scholarship", "scholarship", "apply")
+    card.title = "本科生专项奖学金申请办理"
+    card.source_title = "本科生专项奖学金申请办理"
+    card.evidence_quote = ""
+
+    assert topic_overlap("本科生怎样申请夜间无人机驾驶证", card) < MIN_TOPIC_OVERLAP
+    assert topic_overlap("本科生如何办理校内宠物饲养许可证", card) < MIN_TOPIC_OVERLAP
+
+
+def test_topic_overlap_admits_an_empty_question_rather_than_refusing() -> None:
+    # A degenerate question is the caller's problem, not a reason to invent a
+    # refusal path here.
+    assert topic_overlap("", _evidence("a", "a", "a")) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_an_off_topic_question_is_declined_rather_than_answered(
+    tmp_path: Path,
+    make_approved_card: Callable[..., ReviewedCard],
+) -> None:
+    database_path = tmp_path / "knowledge.sqlite"
+    await build_database([make_approved_card()], database_path, expected_dimension=3)
+    database = KnowledgeDatabase(database_path, expected_dimension=3)
+    try:
+        retriever = StrongRetriever(database, HighConfidenceCurrentModels())
+
+        # The scholarship card is the only thing in the pool and the reranker
+        # scores it 0.95, so without the topic gate it would be served.
+        with pytest.raises(InsufficientEvidence, match="nothing on this topic"):
+            await retriever.retrieve("夜间无人机驾驶证怎么办理")
+    finally:
+        database.close()
+
+
+def test_another_audience_is_recognised_by_who_acts_not_who_is_mentioned() -> None:
+    # The knowledge base is undergraduate-only, and the topic gate cannot catch
+    # these: a graduate scholarship question reads as highly on-topic against
+    # the undergraduate scholarship cards.
+    assert serves_another_audience("研究生国家奖学金评审材料在哪？") == "研究生"
+    assert serves_another_audience("MBA学员如何申请学位？") == "MBA"
+    assert serves_another_audience("教职工专属事项“培训选课”的办理流程是什么？") == "教职工"
+
+    # Mentioned but not the one acting: a 指导教师 is a role on a student's team,
+    # an 国际学生助学金 is a fund an undergraduate applies for, and a 教师岗位 is
+    # a job an undergraduate applies to.
+    assert serves_another_audience("暑期社会实践团队有哪些人数和指导教师要求？") is None
+    assert serves_another_audience("参加SAF海外交流项目可以申请多少国际学生助学金？") is None
+
+    # An explicit undergraduate marker settles it, whatever else is named.
+    assert serves_another_audience("本科生如何申请免试攻读研究生？") is None
+    assert serves_another_audience("推免研究生的名额怎么排？") is None

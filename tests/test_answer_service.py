@@ -490,3 +490,42 @@ async def test_close_waits_for_contextual_executions_outside_the_answer_cache(
         models.release.set()
         await service.close()
         database.close()
+
+
+def _fact_card(evidence: str):
+    from luna_kb.retrieval import CardEvidence
+
+    return CardEvidence(
+        card_id='card-1', source_id='kb_clean:s', parent_card_id=None,
+        title='t', summary='', evidence_quote=evidence, source_locator='正文',
+        facts={}, facets=[], campus='', audience='本科生', validity='current',
+        card_kind='fact', subject_key='sk', fact_key='fk', retrieval_text='',
+        canonical_url='https://example.dlut.edu.cn/a', source_title='st',
+        published_at=None,
+    )
+
+
+def test_quoting_a_url_from_the_evidence_is_not_fabrication() -> None:
+    # Several cards exist to say "go to this address", and their evidence quotes
+    # the URL.  Blocking every URL made those cards unanswerable while the
+    # program attached the very same link underneath as a citation.
+    from luna_kb.service import _fabricated_urls
+
+    card = _fact_card(
+        "可使用该账号和密码登录 http://tulip.dlut.edu.cn 进行自助服务。"
+    )
+    assert _fabricated_urls("请登录 http://tulip.dlut.edu.cn 办理。", [card]) == []
+
+
+def test_a_url_absent_from_the_evidence_is_still_fabrication() -> None:
+    from luna_kb.service import _fabricated_urls
+
+    card = _fact_card("携带学生证到一站式服务大厅办理。")
+    assert _fabricated_urls("请访问 http://its.dlut.edu.cn/reset 重置。", [card])
+
+
+def test_an_answer_without_links_passes() -> None:
+    from luna_kb.service import _fabricated_urls
+
+    card = _fact_card("登录 http://pay.dlut.edu.cn 缴费。")
+    assert _fabricated_urls("携带学生证到服务大厅办理即可。", [card]) == []

@@ -49,7 +49,7 @@ class RetryPolicy:
 # at 30s let one question sleep 2+4+8+16+30 = 60 seconds before failing, which
 # is where the observed 48-second tail came from.  Fail fast and say so.
 ONLINE_RETRY_POLICY = RetryPolicy(
-    max_retries=2, base_delay_seconds=0.5, max_delay_seconds=4.0
+    max_retries=3, base_delay_seconds=1.0, max_delay_seconds=15.0
 )
 # Nobody is waiting on a build, and there is no resume: embeddings live only in
 # memory, so one unabsorbed 429 discards every vector computed so far and the

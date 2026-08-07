@@ -150,6 +150,17 @@ def _parser() -> argparse.ArgumentParser:
 
     evaluation = sub.add_parser("evaluate", help="run the fixed >=300 question gate")
     evaluation.add_argument("--version", required=True)
+    evaluation.add_argument(
+        "--pace-seconds",
+        type=float,
+        default=0.0,
+        help="wait between questions; the gateway limits total requests across endpoints",
+    )
+    evaluation.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="append each finished case here and resume from it",
+    )
     evaluation.add_argument("--set", dest="evaluation_set", type=Path, required=True)
     evaluation.add_argument("--faculty", type=Path, required=True)
 
@@ -259,7 +270,11 @@ async def _evaluate(args: argparse.Namespace) -> dict[str, object]:
             answer_max_sources=settings.answer_max_sources,
         )
         report = await evaluate(
-            evaluation_items, service, faculty_snapshot
+            evaluation_items,
+            service,
+            faculty_snapshot,
+            pace_seconds=getattr(args, "pace_seconds", 0.0),
+            checkpoint=getattr(args, "checkpoint", None),
         )
         if release_model_config(
             models.endpoints,

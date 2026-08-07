@@ -3,6 +3,8 @@ param(
     [string]$Workspace,
     [int]$MaxBatches = 25,
     [string]$Model = "gpt-5.6-luna",
+    [ValidateSet("minimal", "low", "medium", "high", "xhigh")]
+    [string]$ReasoningEffort = "high",
     [ValidateRange(1, 120)]
     [int]$BatchTimeoutMinutes = 20
 )
@@ -51,6 +53,7 @@ function Invoke-LunaProcess {
         "--ephemeral",
         "--skip-git-repo-check",
         "-m", $Model,
+        "-c", "model_reasoning_effort=$ReasoningEffort",
         "-s", "workspace-write",
         "-C", $workspacePath,
         "-o", $FinalPath,

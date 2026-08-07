@@ -16,7 +16,13 @@ from .config import Settings
 from .contracts import normalized_text
 from .errors import InsufficientEvidence, RetrievalUnavailable
 from .release import ReleaseManager, file_sha256
-from .retrieval import CardEvidence, KnowledgeDatabase, RetrievalResult, StrongRetriever
+from .retrieval import (
+    CardEvidence,
+    KnowledgeDatabase,
+    ModelOutputRejected,
+    RetrievalResult,
+    StrongRetriever,
+)
 from .runtime_controls import WorkLimiter
 
 
@@ -72,6 +78,43 @@ def _sentences(answer: str) -> list[str]:
 
 def _numbers(value: str) -> set[str]:
     return set(NUMBER_RE.findall(value or ""))
+
+
+def _url_tokens(text: str) -> list[str]:
+    """Whole URL-ish tokens, so a match can be compared rather than just found."""
+
+    tokens: list[str] = []
+    for match in URL_RE.finditer(text or ""):
+        start = text.rfind(" ", 0, match.start()) + 1
+        for boundary in ("\n", "，", "。", "、", "（", "(", "；"):
+            cut = text.rfind(boundary, 0, match.start())
+            start = max(start, cut + 1)
+        end = len(text)
+        for boundary in (" ", "\n", "，", "。", "、", "）", ")", "；", "”"):
+            cut = text.find(boundary, match.start())
+            if cut != -1:
+                end = min(end, cut)
+        tokens.append(text[start:end].strip().rstrip("。，、；)）"))
+    return tokens
+
+
+def _fabricated_urls(answer: str, cards: list[CardEvidence]) -> list[str]:
+    """URLs in the answer that are not in the evidence the model was given.
+
+    Blocking every URL was too blunt.  Several cards exist precisely to say
+    "go to this address" - the campus network self-service page, the payment
+    platform - and their evidence quotes the URL.  Forbidding the model to
+    repeat it makes those cards unanswerable while the program attaches the very
+    same link underneath as a citation.
+
+    Quoting a link that is in the evidence is faithful; producing one that is
+    not is the hallucination this gate exists to stop.  The allowed set is built
+    per question from the evidence actually supplied, so a link cannot leak in
+    from another card.
+    """
+
+    evidence = "\n".join(card.evidence_quote for card in cards)
+    return [token for token in _url_tokens(answer) if token and token not in evidence]
 
 
 class AnswerService:
@@ -305,9 +348,12 @@ class AnswerService:
         if not answer:
             raise InsufficientEvidence("answer model declined or omitted answer")
         if len(answer) > max_chars:
-            raise RetrievalUnavailable("answer_model", f"answer exceeds {max_chars} characters")
-        if URL_RE.search(answer):
-            raise RetrievalUnavailable("answer_model", "answer contains a model-generated URL")
+            raise ModelOutputRejected("answer_model", f"answer exceeds {max_chars} characters")
+        fabricated = _fabricated_urls(answer, cards)
+        if fabricated:
+            raise ModelOutputRejected(
+                "answer_model", f"answer invents a URL: {fabricated[0]}"
+            )
         card_map = {card.card_id: card for card in cards}
         notes: list[str] = []
         cited_ids: list[str] = []
@@ -357,9 +403,9 @@ class AnswerService:
                 ids = [str(value) for value in claim.get("card_ids", [])]
                 quotes = [str(value).strip() for value in claim.get("evidence_quotes", [])]
                 if not text or text not in answer_sentences or len(ids) != 1 or len(quotes) != 1:
-                    raise RetrievalUnavailable("evidence_gate", "strict claim map is incomplete")
+                    raise ModelOutputRejected("evidence_gate", "strict claim map is incomplete")
                 if text not in card_map[ids[0]].evidence_quote:
-                    raise RetrievalUnavailable("evidence_gate", "strict answer is not extractive")
+                    raise ModelOutputRejected("evidence_gate", "strict answer is not extractive")
         if not cited_ids:
             cited_ids.append(max(cards, key=lambda card: card.rerank_score).card_id)
             notes.append("fallback_top_evidence")

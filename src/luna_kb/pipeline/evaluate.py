@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -22,6 +23,7 @@ from ..evaluation_ledger import (
     summarize_case_ledger,
 )
 from ..errors import BuildError, InsufficientEvidence, RetrievalUnavailable
+from ..retrieval import ModelOutputRejected
 from ..service import AnswerService
 
 
@@ -345,12 +347,44 @@ async def evaluate(
     service: AnswerService,
     faculty_input: Path | ArtifactSnapshot,
     thresholds: EvaluationThresholds | None = None,
+    *,
+    pace_seconds: float = 0.0,
+    checkpoint: Path | None = None,
 ) -> dict[str, Any]:
+    """Run the fixed question set.
+
+    ``pace_seconds`` waits between questions.  The gateway rate-limits on total
+    requests across all of its endpoints, and one question spends three or four
+    of them, so an unpaced run starts failing around the ninth question - and a
+    gateway failure aborts the whole evaluation on purpose, because counting it
+    as "no answer" would forge a restraint score.  The wait sits between
+    questions, so it does not touch the per-question latency this gates on.
+
+    ``checkpoint`` appends each finished case as it completes and skips cases
+    already recorded there.  A three-hundred question run that dies at question
+    two hundred should not throw away two hundred questions of gateway budget.
+    """
+
     thresholds = thresholds or EvaluationThresholds()
     failures: list[dict[str, str]] = []
     case_ledger: list[dict[str, Any]] = []
-    for item in items:
+    done: dict[str, dict[str, Any]] = {}
+    if checkpoint and checkpoint.is_file():
+        for line in checkpoint.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                done[str(entry["id"])] = entry
+        case_ledger.extend(done.values())
+        for entry in done.values():
+            for reason in entry.get("failure_reasons", []):
+                failures.append({"id": entry["id"], "reason": reason})
+
+    for index, item in enumerate(items):
         case_id = str(item["id"])
+        if case_id in done:
+            continue
+        if pace_seconds > 0 and index:
+            await asyncio.sleep(pace_seconds)
         expected = set(str(value) for value in item.get("expected_card_ids", []))
         expected_urls = {canonicalize_url(str(value)) for value in item.get("expected_urls", [])}
         negative = item["kind"] in NEGATIVE_KINDS
@@ -415,6 +449,15 @@ async def evaluate(
             entry["outcome"] = "insufficient"
             if not negative:
                 fail("insufficient evidence")
+        except ModelOutputRejected as exc:
+            # The draft broke an output rule.  That is this question failing,
+            # not the gateway being down, so it is recorded and the run goes on.
+            entry["latency_seconds"] = time.perf_counter() - started
+            # The ledger vocabulary is {answered, insufficient, error}; this is
+            # an error outcome whose cause is recorded in failure_reasons.
+            entry["outcome"] = "error"
+            entry["unsupported_conclusion"] = True
+            fail(f"model output rejected: {exc.detail}")
         except RetrievalUnavailable as exc:
             raise BuildError(
                 f"evaluation aborted because {exc.component} failed ({exc.error_id}); failures cannot count as no-answer"
@@ -425,6 +468,16 @@ async def evaluate(
             entry["unsupported_conclusion"] = True
             fail(f"answer validation failed: {exc}")
         case_ledger.append(entry)
+        if checkpoint:
+            # Append as each case finishes: a gateway failure aborts the run,
+            # and the budget already spent should survive it.
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            with checkpoint.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # Keep the frozen question order, whatever order the checkpoint was in.
+    order = {str(item["id"]): position for position, item in enumerate(items)}
+    case_ledger.sort(key=lambda entry: order.get(str(entry["id"]), len(order)))
 
     isolation = audit_faculty_isolation(service.retriever.database, faculty_input)
     summary = summarize_case_ledger(case_ledger)
