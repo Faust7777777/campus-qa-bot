@@ -194,3 +194,44 @@ def test_noise_from_a_listed_sender_is_still_noise() -> None:
 
     assert decision.kind is DecisionKind.IGNORE
     assert decision.reason == "obvious_noise"
+
+
+def test_a_question_without_a_question_mark_is_still_a_question() -> None:
+    # Chinese asks plenty of questions without punctuation, and chat messages
+    # rarely carry any.  "食堂好吃不" and "食堂好吃不？" ask the same thing.
+    policy = MessagePolicy(allowed_group_ids={10001})
+    for text in (
+        "食堂好吃不",
+        "能不能申请助学金",
+        "宿舍空调是不是坏了",
+        "有没有勤工助学岗",
+        "这个要交钱吗",
+        "转专业难不难",
+    ):
+        decision = policy.decide(
+            InboundMessage("m", "group", 10001, 20001, text)
+        )
+        assert decision.kind is DecisionKind.CLASSIFY, text
+
+
+def test_statements_containing_a_negation_are_not_questions() -> None:
+    # The A-not-A rule keys on a repeated character, so an ordinary 不 does not
+    # turn a statement into a question.
+    policy = MessagePolicy(allowed_group_ids={10001})
+    for text in ("今天天气不错", "我不去了", "这个不行"):
+        decision = policy.decide(
+            InboundMessage("m", "group", 10001, 20001, text)
+        )
+        assert decision.kind is DecisionKind.IGNORE, text
+
+
+def test_a_private_message_needs_no_question_cue() -> None:
+    # Everything sent to the bot one-to-one is addressed to the bot, so the cue
+    # list would only make the sender guess the vocabulary.
+    policy = MessagePolicy(allowed_group_ids={10001}, allowed_user_ids={20001})
+
+    decision = policy.decide(
+        InboundMessage("m", "private", None, 20001, "奖学金")
+    )
+
+    assert decision.kind is DecisionKind.CLASSIFY

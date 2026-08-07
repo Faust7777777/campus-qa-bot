@@ -62,7 +62,21 @@ class CampusQaApplication:
                     self.history.get(key),
                 )
         except InsufficientEvidence:
-            return "知识库暂未收录足够依据。"
+            # Silence, unless the asker insisted with "#".
+            #
+            # The cue list admits anything containing 怎么/什么/为什么, which is
+            # most of how people talk: "刚刚为什么没回" is not a campus question
+            # and cost a full pipeline run and a reply saying so.  A bot that
+            # answers "知识库暂未收录足够依据" to every passing 为什么 is worse in
+            # a group than one that says nothing, because the noise is on it
+            # rather than on the person who typed.
+            #
+            # "#" is the one case that deserves a reply: it means the asker knew
+            # this was a question for the bot, so leaving them waiting is worse
+            # than telling them nothing was found.
+            if decision.kind is DecisionKind.FORCE:
+                return "知识库暂未收录足够依据。"
+            return None
         except RetrievalUnavailable as exc:
             logger.error(
                 "campus QA retrieval failed error_id=%s component=%s group_id=%s",

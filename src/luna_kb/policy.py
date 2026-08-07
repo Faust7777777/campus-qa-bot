@@ -5,7 +5,19 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
-QUESTION_CUES = ("怎么", "如何", "什么", "哪里", "哪儿", "谁", "为何", "为什么", "多少", "几时", "是否", "能否", "可以吗")
+QUESTION_CUES = (
+    "怎么", "怎样", "咋", "如何", "什么", "啥",
+    "哪里", "哪儿", "哪个", "哪些", "谁",
+    "为何", "为什么", "多少", "多久", "几时", "几点", "几个",
+    "是否", "能否", "可以吗", "有没有", "需不需要",
+)
+# Chinese asks plenty of questions without a question mark.  "食堂好吃不" is a
+# question and was ignored, while "食堂好吃不？" was answered - a difference in
+# punctuation, not in what was asked, and most people do not punctuate a chat
+# message.  Two patterns cover most of the rest: a sentence ending in 吗/呢/不,
+# and the A-not-A form (能不能, 是不是, 好不好, 用不用).
+QUESTION_TAILS = ("吗", "呢", "不")
+A_NOT_A = re.compile(r"(.)不\1")
 NOISE_PHRASES = frozenset(
     {
         "好的",
@@ -90,10 +102,24 @@ class MessagePolicy:
             )
         if obvious_noise(text):
             return MessageDecision(DecisionKind.IGNORE, "obvious_noise")
-        if text.endswith(("?", "？")) or any(cue in text for cue in QUESTION_CUES):
+        # A private chat with the bot is addressed to the bot by definition, so
+        # everything that is not obvious noise is treated as a question.  The
+        # cue list exists to pick questions out of group chatter; applying it
+        # one-to-one only means the sender has to guess the vocabulary.
+        if message.message_type != "group" or self._reads_as_a_question(text):
             return MessageDecision(
                 DecisionKind.CLASSIFY,
                 "question_candidate",
                 question=text,
             )
         return MessageDecision(DecisionKind.IGNORE, "not_a_question")
+
+    @staticmethod
+    def _reads_as_a_question(text: str) -> bool:
+        stripped = text.rstrip("。.! ！~ ")
+        return (
+            text.endswith(("?", "？"))
+            or stripped.endswith(QUESTION_TAILS)
+            or bool(A_NOT_A.search(text))
+            or any(cue in text for cue in QUESTION_CUES)
+        )
