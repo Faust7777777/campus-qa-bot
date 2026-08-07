@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import shutil
+import struct
 import sys
 from pathlib import Path
 
@@ -147,6 +150,13 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--reviewed", type=Path, required=True)
     build.add_argument("--review-report", type=Path, required=True)
     build.add_argument("--version", required=True)
+    build.add_argument(
+        "--embedding-cache",
+        type=Path,
+        default=Path("work/embedding_cache.bin"),
+        help="reuse vectors from earlier builds and record this build's; "
+        "keyed by the embedded text, so an edited card is re-embedded",
+    )
 
     evaluation = sub.add_parser("evaluate", help="run the fixed >=300 question gate")
     evaluation.add_argument("--version", required=True)
@@ -171,6 +181,73 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+EMBEDDING_CACHE_MAGIC = b"LUNAEMB1"
+
+
+def _embedding_key(card: Any) -> bytes:
+    """Content address for one card's vector.
+
+    Keyed on the text that is actually embedded rather than on the card id, so
+    editing a card's wording misses the cache and is re-embedded, while moving
+    or renaming one that reads the same is free.
+    """
+
+    return hashlib.sha256(card.search_text().encode("utf-8")).digest()
+
+
+def load_embedding_cache(path: Path, dimension: int) -> dict[bytes, list[float]]:
+    """Vectors computed by an earlier build, if any survive.
+
+    A build embeds every card that arrives without a vector, and the reviewed
+    JSONL carries none - so adding one card re-embedded all 3,264 of them, about
+    102 batched gateway calls for one line of new knowledge.  Nothing about the
+    other 3,263 changed.
+
+    Missing, truncated or stale files are not an error: the cache is an
+    optimisation, and the correct response to a damaged one is to embed again.
+    """
+
+    if not path or not path.is_file():
+        return {}
+    raw = path.read_bytes()
+    if not raw.startswith(EMBEDDING_CACHE_MAGIC):
+        return {}
+    stored_dimension = int.from_bytes(raw[8:12], "little")
+    if stored_dimension != dimension:
+        return {}
+    record = 32 + dimension * 4
+    body = raw[12:]
+    cached: dict[bytes, list[float]] = {}
+    for offset in range(0, len(body) - record + 1, record):
+        chunk = body[offset : offset + record]
+        cached[chunk[:32]] = list(
+            struct.unpack(f"<{dimension}f", chunk[32:])
+        )
+    return cached
+
+
+def save_embedding_cache(path: Path, reviewed: list[Any], dimension: int) -> int:
+    """Write back every vector this build ended up holding."""
+
+    if not path:
+        return 0
+    seen: dict[bytes, list[float]] = {}
+    for item in reviewed:
+        vector = item.card.embedding
+        if vector and len(vector) == dimension:
+            seen[_embedding_key(item.card)] = list(vector)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        handle.write(EMBEDDING_CACHE_MAGIC)
+        handle.write(dimension.to_bytes(4, "little"))
+        for key, vector in seen.items():
+            handle.write(key)
+            handle.write(struct.pack(f"<{dimension}f", *vector))
+    os.replace(temporary, path)
+    return len(seen)
+
+
 async def _build(args: argparse.Namespace) -> dict[str, object]:
     settings = Settings.from_env()
     settings.validate()
@@ -193,6 +270,15 @@ async def _build(args: argparse.Namespace) -> dict[str, object]:
         reviewed_sha256 = reviewed_snapshot.sha256
         if review_report.get("reviewed_sha256") != reviewed_sha256:
             raise BuildError("review report checksum does not match the reviewed JSONL input")
+        cache_path = Path(args.embedding_cache) if args.embedding_cache else None
+        cached = load_embedding_cache(cache_path, settings.embedding_dimension) if cache_path else {}
+        reused = 0
+        for item in reviewed:
+            if item.card.embedding is None:
+                vector = cached.get(_embedding_key(item.card))
+                if vector is not None:
+                    item.card.embedding = vector
+                    reused += 1
         build_report = await build_database(
             reviewed,
             staging / "knowledge.sqlite",
@@ -200,6 +286,11 @@ async def _build(args: argparse.Namespace) -> dict[str, object]:
             settings.embedding_dimension,
         )
         build_report["reviewed_sha256"] = reviewed_sha256
+        build_report["embeddings_reused"] = reused
+        if cache_path:
+            build_report["embeddings_cached"] = save_embedding_cache(
+                cache_path, reviewed, settings.embedding_dimension
+            )
         if release_build_config(
             models.endpoints, embedding_dimension=settings.embedding_dimension
         ) != build_model_config:
