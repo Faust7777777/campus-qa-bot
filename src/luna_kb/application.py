@@ -74,7 +74,12 @@ class CampusQaApplication:
             # "#" is the one case that deserves a reply: it means the asker knew
             # this was a question for the bot, so leaving them waiting is worse
             # than telling them nothing was found.
-            if decision.kind is DecisionKind.FORCE:
+            # Silence is a group-noise measure and does not belong one-to-one.
+            # In a private chat the sender cannot tell "filtered" from "found
+            # nothing" from "broken", and they are talking to the bot on
+            # purpose: "这个建设银行卡必须办理吗？" ran the whole pipeline and
+            # returned nothing at all.
+            if decision.kind is DecisionKind.FORCE or message.group_id is None:
                 return "知识库暂未收录足够依据。"
             return None
         except RetrievalUnavailable as exc:
