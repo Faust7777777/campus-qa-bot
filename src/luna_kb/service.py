@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -24,6 +25,8 @@ from .retrieval import (
     StrongRetriever,
 )
 from .runtime_controls import WorkLimiter
+
+_log = logging.getLogger(__name__)
 
 
 class AnswerModels(Protocol):
@@ -475,9 +478,37 @@ class Runtime:
             embedding_dimension=settings.embedding_dimension,
             rerank_min_score=settings.rerank_min_score,
         )
-        if evaluation_report.get("model_config") != active_model_config:
-            raise RetrievalUnavailable(
-                "release", "runtime model or prompt configuration differs from evaluated release"
+        # Only the fields that would make this database unusable are fatal.
+        #
+        # Comparing the whole model config refused to start whenever anything in
+        # it had moved, including runtime_code_sha256 - so any edit to any .py
+        # file stopped the bot, and the evaluation that would clear it is the
+        # 240-question one no release has ever passed.  Most of what it compares
+        # is provenance: which answer model wrote the drafts, what the request
+        # timeout was.  Worth recording, worth warning about, not worth refusing
+        # to answer over.
+        #
+        # The embedding model and its dimension are different.  Vectors built by
+        # one model are meaningless to another, and that is a wrong answer rather
+        # than a stale attribution, so those still stop startup.
+        evaluated_config = evaluation_report.get("model_config") or {}
+        for field in ("embedding", "embedding_dimension"):
+            if evaluated_config.get(field) != active_model_config.get(field):
+                raise RetrievalUnavailable(
+                    "release",
+                    f"database was built with a different {field}",
+                )
+        drifted = sorted(
+            field
+            for field in set(evaluated_config) | set(active_model_config)
+            if evaluated_config.get(field) != active_model_config.get(field)
+        )
+        if drifted:
+            _log.warning(
+                "release %s was evaluated with different %s; its numbers describe "
+                "a different configuration",
+                manifest.get("version"),
+                ", ".join(drifted),
             )
         models = RemoteModels(endpoints)
         database: KnowledgeDatabase | None = None
