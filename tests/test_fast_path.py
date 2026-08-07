@@ -25,8 +25,8 @@ class NoPlannerModels:
     async def embed(self, texts: list[str]):
         return [[1.0, 0.0, 0.0] for _ in texts]
 
-    async def rerank(self, query: str, documents: list[str]):
-        return [(index, 0.95) for index in range(len(documents))]
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {"picked": list(range(1, len(candidates) + 1)), "entry_points": []}
 
 
 @pytest.mark.asyncio

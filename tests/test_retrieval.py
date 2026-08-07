@@ -241,8 +241,15 @@ class LowConfidenceModels:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[1.0, 0.0, 0.0] for _ in texts]
 
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        return [(index, 0.05) for index in range(len(documents))]
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {"picked": [], "entry_points": []}
+
+
+class SelectingModels(LowConfidenceModels):
+    """A selector that accepts every candidate, for tests about later stages."""
+
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {"picked": list(range(1, len(candidates) + 1)), "entry_points": []}
 
 
 class EmbeddingFailureModels(LowConfidenceModels):
@@ -255,34 +262,60 @@ class InvalidEmbeddingModels(LowConfidenceModels):
         return [[float("nan"), 0.0, 0.0] for _ in texts]
 
 
-class RerankerFailureModels(LowConfidenceModels):
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        raise RetrievalUnavailable("reranker", "gateway unavailable")
+class SelectorFailureModels(LowConfidenceModels):
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        raise RetrievalUnavailable("selector", "gateway unavailable")
 
 
-class MissingFacetModels(LowConfidenceModels):
-    async def plan(self, question: str, history=None) -> dict:
-        plan = await super().plan(question, history)
-        plan["required_facets"] = ["联系"]
-        return plan
+class EntryPointOnlyModels(LowConfidenceModels):
+    """A selector that finds no text answering the question, only an entry point."""
 
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        return [(index, 0.95) for index in range(len(documents))]
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {
+            "picked": [],
+            "entry_points": [
+                number for number, text in enumerate(candidates, 1) if "无正文" in text
+            ],
+        }
 
 
-class LingShuiCurrentModels(LowConfidenceModels):
+class EvidenceOverEntryPointModels(LowConfidenceModels):
+    """A selector that offers both, to prove evidence is preferred."""
+
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {
+            "picked": [
+                number for number, text in enumerate(candidates, 1) if "无正文" not in text
+            ],
+            "entry_points": [
+                number for number, text in enumerate(candidates, 1) if "无正文" in text
+            ],
+        }
+
+
+class NavigationPickModels(LowConfidenceModels):
+    """A selector that picks only the card with no evidence behind it."""
+
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {
+            "entry_points": [],
+            "picked": [
+                number
+                for number, text in enumerate(candidates, 1)
+                if "无正文" in text
+            ]
+        }
+
+
+class LingShuiCurrentModels(SelectingModels):
     async def plan(self, question: str, history=None) -> dict:
         plan = await super().plan(question, history)
         plan["filters"]["campus"] = "凌水"
         return plan
 
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        return [(index, 0.95) for index in range(len(documents))]
 
-
-class HighConfidenceCurrentModels(LowConfidenceModels):
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        return [(index, 0.95) for index in range(len(documents))]
+class HighConfidenceCurrentModels(SelectingModels):
+    pass
 
 
 @pytest.mark.asyncio
@@ -303,7 +336,7 @@ async def test_low_reranker_confidence_is_insufficient_evidence(
 
 
 @pytest.mark.asyncio
-async def test_reranker_failure_does_not_return_first_stage_results(
+async def test_selector_failure_does_not_return_first_stage_results(
     tmp_path: Path,
     make_approved_card: Callable[..., ReviewedCard],
 ) -> None:
@@ -311,12 +344,12 @@ async def test_reranker_failure_does_not_return_first_stage_results(
     await build_database([make_approved_card()], database_path, expected_dimension=3)
     database = KnowledgeDatabase(database_path, expected_dimension=3)
     try:
-        retriever = StrongRetriever(database, RerankerFailureModels())
+        retriever = StrongRetriever(database, SelectorFailureModels())
 
         with pytest.raises(RetrievalUnavailable) as error:
             await retriever.retrieve("奖学金怎么申请")
 
-        assert error.value.component == "reranker"
+        assert error.value.component == "selector"
     finally:
         database.close()
 
@@ -360,7 +393,7 @@ async def test_invalid_embedding_values_close_retrieval(
 
 
 @pytest.mark.asyncio
-async def test_missing_fact_facets_can_only_fall_back_to_a_clean_navigation_card(
+async def test_a_navigation_pick_yields_a_card_with_no_evidence_attached(
     tmp_path: Path,
     make_approved_card: Callable[..., ReviewedCard],
 ) -> None:
@@ -389,7 +422,7 @@ async def test_missing_fact_facets_can_only_fall_back_to_a_clean_navigation_card
     await build_database([fact, navigation], database_path, expected_dimension=3)
     database = KnowledgeDatabase(database_path, expected_dimension=3)
     try:
-        result = await StrongRetriever(database, MissingFacetModels()).retrieve(
+        result = await StrongRetriever(database, NavigationPickModels()).retrieve(
             "奖学金怎么联系"
         )
 
@@ -493,7 +526,7 @@ async def test_vector_filter_is_applied_before_top_k_selection(
         filters=QueryFilters(campus="凌水", audience="本科生", time_scope="current"),
     )
     try:
-        assert database.vector([[1.0, 0.0, 0.0]], plan, limit=10) == ["card-allowed"]
+        assert [c for c, _ in database.vector([[1.0, 0.0, 0.0]], plan, limit=10)] == ["card-allowed"]
     finally:
         database.close()
 
@@ -554,8 +587,8 @@ async def test_campus_specific_query_keeps_campus_wide_cards(
         filters=QueryFilters(campus="凌水", audience="本科生", time_scope="current"),
     )
     try:
-        assert database.exact(["奖学金怎么申请"], plan) == ["card-campus-wide"]
-        assert database.vector([[1.0, 0.0, 0.0]], plan) == ["card-campus-wide"]
+        assert [c for c, _ in database.exact(["奖学金怎么申请"], plan)] == ["card-campus-wide"]
+        assert [c for c, _ in database.vector([[1.0, 0.0, 0.0]], plan)] == ["card-campus-wide"]
     finally:
         database.close()
 
@@ -582,8 +615,8 @@ async def test_multi_campus_card_is_recalled_only_for_included_campuses(
                 required_facets=[],
                 filters=QueryFilters(campus=campus, audience="本科生", time_scope="current"),
             )
-            assert database.exact(["奖学金怎么申请"], plan) == ["card-two-campuses"]
-            assert database.vector([[1.0, 0.0, 0.0]], plan) == ["card-two-campuses"]
+            assert [c for c, _ in database.exact(["奖学金怎么申请"], plan)] == ["card-two-campuses"]
+            assert [c for c, _ in database.vector([[1.0, 0.0, 0.0]], plan)] == ["card-two-campuses"]
 
         panjin_plan = QueryPlan(
             intent="fact",
@@ -651,28 +684,27 @@ def _navigation(
     return item
 
 
-class TopicBlindRerankerModels(LowConfidenceModels):
-    """Reproduces the observed gateway behaviour: a narrow, topic-blind band.
+class NavigationFirstModels(LowConfidenceModels):
+    """A selector that ranks the navigation card above an off-topic fact card."""
 
-    The off-topic library card scores 0.929 and the on-topic navigation card
-    scores 0.911, exactly as measured against the DLUT gateway.
-    """
-
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        return [
-            (index, 0.929 if "图书馆" in document else 0.911)
-            for index, document in enumerate(documents)
-        ]
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        order = sorted(
+            range(1, len(candidates) + 1),
+            key=lambda number: "图书馆" in candidates[number - 1],
+        )
+        return {"picked": order, "entry_points": []}
 
 
 @pytest.mark.asyncio
-async def test_navigation_card_wins_when_the_reranker_prefers_an_off_topic_fact(
+async def test_the_selectors_leader_decides_the_kind_of_answer(
     tmp_path: Path,
     make_approved_card: Callable[..., ReviewedCard],
 ) -> None:
-    # The regression this pins: card kind must not decide precedence.  The
-    # reranker puts an unrelated fact card first, but the first stage puts the
-    # navigation card first, so the fused rank must select navigation.
+    # The regression this pins: card kind must not decide precedence.  An
+    # unrelated fact card is in the pool with real evidence text, and a bare
+    # navigation card is what actually belongs to the question, so preferring
+    # fact cards on principle would answer from the library card.  The
+    # selector ranks navigation first and that has to hold.
     database_path = tmp_path / "knowledge.sqlite"
     await build_database(
         [_polluting_fact(make_approved_card), _navigation(make_approved_card)],
@@ -681,16 +713,15 @@ async def test_navigation_card_wins_when_the_reranker_prefers_an_off_topic_fact(
     )
     database = KnowledgeDatabase(database_path, expected_dimension=3)
     try:
-        result = await StrongRetriever(database, TopicBlindRerankerModels()).retrieve(
+        result = await StrongRetriever(database, NavigationFirstModels()).retrieve(
             "奖学金怎么申请"
         )
 
-        # The reranker prefers the library card and the first stage prefers the
-        # navigation card; assert the outcome first so a regression reports the
-        # card it wrongly selected rather than a missing trace field.
+        # Assert the outcome first so a regression reports the card it wrongly
+        # selected rather than a missing trace field.
         assert [card.card_id for card in result.cards] == ["card-navigation"]
         assert result.cards[0].evidence_quote == ""
-        assert result.trace.reranked_ids[0] == "card-library"
+        assert result.trace.selection_ids[0] == "card-navigation"
         assert result.trace.first_stage_ids[0] == "card-navigation"
         assert result.trace.selection_ids[0] == "card-navigation"
     finally:
@@ -869,12 +900,59 @@ async def test_an_off_topic_question_is_declined_rather_than_answered(
     await build_database([make_approved_card()], database_path, expected_dimension=3)
     database = KnowledgeDatabase(database_path, expected_dimension=3)
     try:
-        retriever = StrongRetriever(database, HighConfidenceCurrentModels())
+        retriever = StrongRetriever(database, LowConfidenceModels())
 
-        # The scholarship card is the only thing in the pool and the reranker
-        # scores it 0.95, so without the topic gate it would be served.
-        with pytest.raises(InsufficientEvidence, match="nothing on this topic"):
+        # Recall always has a best member, so the scholarship card reaches the
+        # selector for this question too.  Declining is a judgement no ranking
+        # stage could make and the selector's alone: an empty pick has to become
+        # a refusal rather than fall through to whatever ranked first.
+        with pytest.raises(InsufficientEvidence, match="no candidate answers"):
             await retriever.retrieve("夜间无人机驾驶证怎么办理")
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("models", "expected"),
+    [
+        (EntryPointOnlyModels, "card-navigation"),
+        (EvidenceOverEntryPointModels, "card-scholarship"),
+    ],
+)
+async def test_entry_points_answer_only_when_no_evidence_does(
+    models: type,
+    expected: str,
+    tmp_path: Path,
+    make_approved_card: Callable[..., ReviewedCard],
+) -> None:
+    # Navigation cards reach the selector as a bare title, so asking only which
+    # text answers the question can never return one.  Offering the official
+    # page is still the right answer when nothing carries the text, and still
+    # the wrong one when something does.
+    navigation = make_approved_card(
+        card_id="card-navigation",
+        card_title="奖学金联系官方页面",
+        source_id="kb_clean:navigation",
+        canonical_url="https://example.dlut.edu.cn/navigation",
+        source_title="奖学金联系官方页面",
+        fact_key="navigation",
+    )
+    navigation.review_status = ReviewStatus.DOWNGRADED
+    navigation.card.card_kind = "navigation"
+    navigation.card.summary = ""
+    navigation.card.evidence_quote = ""
+    navigation.card.source_locator = ""
+    navigation.card.facts = {}
+    navigation.card.facets = []
+    navigation.card.fact_key = ""
+    database_path = tmp_path / "knowledge.sqlite"
+    await build_database([make_approved_card(), navigation], database_path, expected_dimension=3)
+    database = KnowledgeDatabase(database_path, expected_dimension=3)
+    try:
+        result = await StrongRetriever(database, models()).retrieve("奖学金怎么申请")
+
+        assert [card.card_id for card in result.cards] == [expected]
     finally:
         database.close()
 
@@ -896,3 +974,24 @@ def test_another_audience_is_recognised_by_who_acts_not_who_is_mentioned() -> No
     # An explicit undergraduate marker settles it, whatever else is named.
     assert serves_another_audience("本科生如何申请免试攻读研究生？") is None
     assert serves_another_audience("推免研究生的名额怎么排？") is None
+
+
+def test_topic_gate_scores_the_queries_that_actually_ran() -> None:
+    # The planner translates register: 打工 becomes 勤工助学, 清场 becomes 闭馆,
+    # and retrieval runs on those.  Scoring the gate on the user's original
+    # wording rejected cards the translated subquery had correctly found - all
+    # ten colloquial test questions failed this way, several with the right card
+    # at rank 1.
+    card = _evidence("qgzx", "qgzx", "hours")
+    card.title = "勤工助学工作时长原则"
+    card.source_title = "勤工助学管理办法"
+    card.evidence_quote = "学生参加勤工助学的时间原则上每周不超过8小时。"
+
+    colloquial = "校内打工一星期最多能干几个钟头"
+    translated = "学生勤工助学时间限制政策"
+
+    assert topic_overlap(colloquial, card) < MIN_TOPIC_OVERLAP
+    assert topic_overlap(translated, card) >= MIN_TOPIC_OVERLAP
+    # The gate takes the best over every query that ran, so the translation
+    # rescues the card the original wording would have thrown away.
+    assert max(topic_overlap(q, card) for q in (colloquial, translated)) >= MIN_TOPIC_OVERLAP

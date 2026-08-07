@@ -49,17 +49,16 @@ from luna_kb.retrieval import KnowledgeDatabase, StrongRetriever  # noqa: E402
 # A green fixture must fail if any of these regress.
 MIN_POOL_RECALL = 0.97
 MIN_ALLOCATOR_SURVIVAL = 0.97
-MIN_SELECTION_ACCURACY = 0.90
 
-RERANK_BAND_LOW = 0.911
-RERANK_BAND_HIGH = 0.929
 POSITIVE_KINDS = ("answerable", "historical")
 
 
 class LexicalOnlyDatabase(KnowledgeDatabase):
     """The release database with its vector channel switched off."""
 
-    def vector(self, vectors: list[list[float]], plan: Any, limit: int = 50) -> list[str]:
+    def vector(
+        self, vectors: list[list[float]], plan: Any, limit: int = 50
+    ) -> list[tuple[str, float]]:
         return []
 
 
@@ -94,34 +93,15 @@ class OfflineModels:
         vector = [1.0] + [0.0] * (self._dimension - 1)
         return [list(vector) for _ in texts]
 
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        # Longest document wins, all scores inside the observed narrow band.
-        order = sorted(range(len(documents)), key=lambda i: (-len(documents[i]), i))
-        span = RERANK_BAND_HIGH - RERANK_BAND_LOW
-        step = span / max(len(documents) - 1, 1)
-        return [
-            (index, round(RERANK_BAND_HIGH - position * step, 6))
-            for position, index in enumerate(order)
-        ]
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        # The real selector is a language model, so what it would choose cannot
+        # be replayed offline.  Accepting the whole pool in first-stage order
+        # keeps the two gates this fixture can still prove - that gold reaches
+        # the pool and survives allocation - and turns the third into "gold is
+        # still the leading candidate when the selector is handed the pool",
+        # which is the most an offline fixture can say about selection.
+        return {"picked": list(range(1, len(candidates) + 1)), "entry_points": []}
 
-
-def _legacy_rank_fused(
-    cards: list[Any], rerank_ranks: dict[str, int], pool_size: int
-) -> list[Any]:
-    """Pre-P1 ordering: every fact card ahead of every navigation card.
-
-    Substituting this for ``StrongRetriever._rank_fused`` reproduces the old
-    ``if fact_cards:`` precedence exactly, because the selector then always
-    finds a fact card in front whenever one qualifies.
-    """
-
-    return sorted(
-        cards,
-        key=lambda card: (
-            card.card_kind != "fact",
-            rerank_ranks.get(card.card_id, len(rerank_ranks) + 1),
-        ),
-    )
 
 
 def load_positives(path: Path) -> list[dict[str, Any]]:
@@ -199,10 +179,15 @@ def report(label: str, stats: dict[str, Any]) -> float:
         f"  gold survives the allocator         {stats['allocator_hit']}/{pool}"
         f" = {stats['allocator_hit'] / max(pool, 1):.1%}"
     )
+    # Informational, not a gate.  Selection is a language model reading the
+    # pool, so what it would pick cannot be replayed offline; the stub above
+    # accepts everything, which makes these numbers a property of the allocator's
+    # ordering rather than of selection quality.  Selection is measured against
+    # the real gateway by scripts/run_smoke_set.py.
     accuracy = stats["selected_hit"] / max(total, 1)
     top1 = stats["top1_hit"] / max(total, 1)
-    print(f"  gold SELECTED (anywhere in answer)  {stats['selected_hit']}/{total} = {accuracy:.1%}")
-    print(f"  gold SELECTED FIRST (strict)        {stats['top1_hit']}/{total} = {top1:.1%}")
+    print(f"  [info] gold selected under the stub {stats['selected_hit']}/{total} = {accuracy:.1%}")
+    print(f"  [info] gold led under the stub      {stats['top1_hit']}/{total} = {top1:.1%}")
     if stats["refused"]:
         print(f"  refused (insufficient evidence)     {stats['refused']}")
     for kind, (hit, seen) in sorted(stats["by_kind"].items()):
@@ -238,16 +223,6 @@ def main() -> int:
 
     database = LexicalOnlyDatabase(args.release, args.dimension)
     try:
-        if args.compare_legacy:
-            # Take the staticmethod object itself, not the plain function the
-            # class attribute resolves to, so restoring it stays a staticmethod.
-            original = StrongRetriever.__dict__["_rank_fused"]
-            StrongRetriever._rank_fused = staticmethod(_legacy_rank_fused)
-            try:
-                report("BEFORE (fact-first precedence)", asyncio.run(replay(database, items, args.dimension)))
-            finally:
-                StrongRetriever._rank_fused = original
-
         stats = asyncio.run(replay(database, items, args.dimension))
         accuracy = report("CURRENT", stats)
 
@@ -256,7 +231,6 @@ def main() -> int:
         checks = {
             "pool_recall": pool_recall >= MIN_POOL_RECALL,
             "allocator_survival": survival >= MIN_ALLOCATOR_SURVIVAL,
-            "selection_accuracy": accuracy >= MIN_SELECTION_ACCURACY,
         }
         if stats["misses"]:
             print("\n  misses (first 10):")

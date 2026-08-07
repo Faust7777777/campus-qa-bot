@@ -30,8 +30,8 @@ class LongAnswerModels:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         return [[1.0, 0.0, 0.0] for _ in texts]
 
-    async def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
-        return [(index, 0.95) for index in range(len(documents))]
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict:
+        return {"picked": list(range(1, len(candidates) + 1)), "entry_points": []}
 
     async def draft_answer(self, question: str, evidence: list[dict]) -> dict:
         answer = "本" * 161

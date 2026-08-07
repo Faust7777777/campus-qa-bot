@@ -72,6 +72,20 @@ PLANNER_SYSTEM_PROMPT = (
     "工作量、规则、审批、结果、课程、考试、成绩、账号、密码、设备、报修、医保、"
     "安全、退费、住宿中选择，不要把问题主题本身当作功能面。简单问题只给一个subquery。"
 )
+SELECTOR_SYSTEM_PROMPT = (
+    "你是大连理工大学本科生答疑助手的选卡环节。下面给出一批候选卡片，每张有编号、标题和正文。"
+    "候选里有两种：带正文的知识卡，和只有标题的官方入口卡"
+    "（正文位置写着“无正文，仅为官方入口链接”）。\n"
+    "分两步判断：\n"
+    "1. picked：哪些知识卡的正文能直接回答问题。只看正文是否真的含有问题要的信息，"
+    "不要因为标题像就选。最多 3 张，按相关性排序。\n"
+    "2. entry_points：仅当 picked 为空时才填。哪些官方入口卡正是办理这件事的官方页面，"
+    "可以让提问者自己去查。最多 3 张。不确定是不是同一件事就不要填。\n"
+    "两者都为空是正常且必要的结果：问题超出校内本科生事务范围、涉及他人隐私、"
+    "或候选里根本没有相关内容时，都返回空，绝不勉强凑一张。\n"
+    '只输出 JSON：{"picked": [编号, ...], "entry_points": [编号, ...], "reason": "一句话"}'
+)
+
 ANSWER_SYSTEM_PROMPT = (
     "你是校园答疑草案撰写器。优先依据给定事实卡回答，不要调用自身常识补造政策；"
     "允许忠实、自然地改写和压缩证据，不要求逐字引用，也不要求每句都能在原文中找到。"
@@ -403,6 +417,29 @@ class RemoteModels:
             return sorted(results, key=lambda item: item[1], reverse=True)
         except Exception as exc:
             raise RetrievalUnavailable("reranker", f"malformed response: {exc}") from exc
+
+    async def select_evidence(self, question: str, candidates: list[str]) -> dict[str, Any]:
+        """Ask the answer model which candidates actually answer the question.
+
+        This replaces the dedicated reranker, which was measured blind on this
+        knowledge base: it scored every candidate between 0.85 and 0.96 and
+        ranked 毕业生集体户口迁出 first for both a club-registration and a
+        tuition-refund question.  Candidates are numbered rather than named so
+        the model returns an ordinal it cannot invent, and the whole pool fits
+        in one call - about 4,700 characters for fifty cards.
+        """
+
+        if not candidates:
+            return {"picked": []}
+        listing = "\n".join(f"{number}. {text}" for number, text in enumerate(candidates, 1))
+        return await self._chat_json(
+            "selector",
+            self.endpoints.answer_model,
+            [
+                {"role": "system", "content": SELECTOR_SYSTEM_PROMPT},
+                {"role": "user", "content": f"用户问题：{question}\n\n候选卡片：\n{listing}"},
+            ],
+        )
 
     async def draft_answer(self, question: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
         return await self._chat_json(

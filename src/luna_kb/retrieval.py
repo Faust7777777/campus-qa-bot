@@ -224,6 +224,10 @@ class CardEvidence:
 @dataclass(slots=True)
 class RetrievalTrace:
     channel_ids: dict[str, list[str]] = field(default_factory=dict)
+    # Native score per channel, kept so a caller can judge how good the best hit
+    # is rather than only which hit is best.  Scales differ and are documented
+    # on each channel: exact and trigram and vector are absolute, bm25 is not.
+    channel_scores: dict[str, dict[str, float]] = field(default_factory=dict)
     first_stage_ids: list[str] = field(default_factory=list)
     fused_ids: list[str] = field(default_factory=list)
     reranked_ids: list[str] = field(default_factory=list)
@@ -357,7 +361,7 @@ class KnowledgeDatabase:
             params.append(plan.filters.audience)
         return " AND ".join(clauses), params
 
-    def exact(self, queries: list[str], plan: QueryPlan, limit: int = 10) -> list[str]:
+    def exact(self, queries: list[str], plan: QueryPlan, limit: int = 10) -> list[tuple[str, float]]:
         terms = list(dict.fromkeys(normalized_text(query) for query in queries if normalized_text(query)))
         if not terms:
             return []
@@ -374,9 +378,11 @@ class KnowledgeDatabase:
         with lock:
             self._ensure_open()
             rows = connection.execute(sql, [*terms, *params, limit]).fetchall()
-        return [str(row[0]) for row in rows]
+        # Tier 0/1/2 is title / standard question / other, which is absolute:
+        # an exact title hit means the same thing regardless of the corpus.
+        return [(str(row[0]), {0: 1.0, 1: 0.9}.get(int(row[1]), 0.8)) for row in rows]
 
-    def bm25(self, queries: list[str], plan: QueryPlan, limit: int = 40) -> list[str]:
+    def bm25(self, queries: list[str], plan: QueryPlan, limit: int = 40) -> list[tuple[str, float]]:
         best: dict[str, tuple[int, float]] = {}
         filters, filter_params = self._filter_sql(plan)
         for query_index, query in enumerate(queries):
@@ -400,9 +406,15 @@ class KnowledgeDatabase:
                 value = (rank, float(row[1]))
                 if key not in best or value < best[key]:
                     best[key] = value
-        return [key for key, _ in sorted(best.items(), key=lambda item: item[1])[:limit]]
+        # SQLite bm25() is negative and better the lower it goes, and its scale
+        # depends on the corpus, so this is a ranking signal only - it cannot
+        # answer "is the best hit any good".
+        return [
+            (key, float(value[1]))
+            for key, value in sorted(best.items(), key=lambda item: item[1])[:limit]
+        ]
 
-    def trigram(self, queries: list[str], plan: QueryPlan, limit: int = 30) -> list[str]:
+    def trigram(self, queries: list[str], plan: QueryPlan, limit: int = 30) -> list[tuple[str, float]]:
         best: dict[str, float] = {}
         filters, params = self._filter_sql(plan)
         for query in queries:
@@ -426,9 +438,11 @@ class KnowledgeDatabase:
             for row in rows:
                 key, score = str(row[0]), float(row[1])
                 best[key] = max(score, best.get(key, 0.0))
-        return [key for key, _ in sorted(best.items(), key=lambda item: (-item[1], item[0]))[:limit]]
+        # Overlap fraction in [0, 1], absolute: it is the share of the query's
+        # trigrams the card carries, whatever else is in the corpus.
+        return sorted(best.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
-    def vector(self, vectors: list[list[float]], plan: QueryPlan, limit: int = 50) -> list[str]:
+    def vector(self, vectors: list[list[float]], plan: QueryPlan, limit: int = 50) -> list[tuple[str, float]]:
         best: dict[str, float] = {}
         for vector in vectors:
             if len(vector) != self.expected_dimension:
@@ -464,14 +478,20 @@ class KnowledgeDatabase:
             for row in nearest:
                 key, distance = str(row[0]), float(row[1])
                 best[key] = min(distance, best.get(key, float("inf")))
-        return [key for key, _ in sorted(best.items(), key=lambda item: (item[1], item[0]))[:limit]]
+        # Cosine distance in [0, 2] turned into similarity in [0, 1].  Absolute,
+        # and the one signal that can say the nearest neighbour is still far:
+        # this channel is k-NN, so it always returns k rows however unrelated.
+        return [
+            (key, max(0.0, 1.0 - distance / 2.0))
+            for key, distance in sorted(best.items(), key=lambda item: (item[1], item[0]))[:limit]
+        ]
 
     async def recall_channels(
         self,
         queries: list[str],
         vectors: list[list[float]],
         plan: QueryPlan,
-    ) -> dict[str, list[str]]:
+    ) -> dict[str, list[tuple[str, float]]]:
         channel_names = ("exact", "bm25", "trigram", "vector")
         results = await asyncio.gather(
             asyncio.to_thread(self.exact, queries, plan, 10),
@@ -480,7 +500,7 @@ class KnowledgeDatabase:
             asyncio.to_thread(self.vector, vectors, plan, 50),
             return_exceptions=True,
         )
-        channels: dict[str, list[str]] = {}
+        channels: dict[str, list[tuple[str, float]]] = {}
         for name, result in zip(channel_names, results, strict=True):
             if isinstance(result, BaseException):
                 # asyncio cannot stop an already-running to_thread call. Wait
@@ -688,6 +708,7 @@ class StrongRetriever:
         models: RetrievalModels,
         min_rerank_score: float = 0.35,
         fast_path_enabled: bool = False,
+        vector_recall_enabled: bool = True,
     ) -> None:
         if not 0 <= min_rerank_score <= 1:
             raise ValueError("min_rerank_score must be between 0 and 1")
@@ -695,6 +716,15 @@ class StrongRetriever:
         self.models = models
         self.min_rerank_score = min_rerank_score
         self.fast_path_enabled = fast_path_enabled
+        # Measured over 44 realistic questions: the vector channel supplied the
+        # leading candidate 0 times while adding cards to the pool every time,
+        # and those additions are what let an invented question clear the topic
+        # gate.  A confidence-gated fallback was the obvious answer but the data
+        # does not support one - on realistic phrasing the lexical channels'
+        # absolute scores do not separate answerable from out-of-scope
+        # (trigram medians 0.20 against 0.18).  So this is a switch to be
+        # decided by an A/B on the smoke set, not an automatic rule.
+        self.vector_recall_enabled = vector_recall_enabled
         self.candidate_allocator = RerankCandidateAllocator()
 
     async def retrieve(
@@ -724,15 +754,26 @@ class StrongRetriever:
             if other:
                 raise InsufficientEvidence(f"serves {other}, not undergraduates")
             queries = list(dict.fromkeys([plan.standalone_query, *plan.subqueries]))
-            started = time.perf_counter()
-            vectors = await self.models.embed(queries)
-            stage_seconds["embedding"] = time.perf_counter() - started
-            if len(vectors) != len(queries):
-                raise RetrievalUnavailable("embedding", "query embedding count mismatch")
+            vectors: list[list[float]] = []
+            if self.vector_recall_enabled:
+                started = time.perf_counter()
+                vectors = await self.models.embed(queries)
+                stage_seconds["embedding"] = time.perf_counter() - started
+                if len(vectors) != len(queries):
+                    raise RetrievalUnavailable("embedding", "query embedding count mismatch")
             started = time.perf_counter()
             channels = await self.database.recall_channels(queries, vectors, plan)
             stage_seconds["recall"] = time.perf_counter() - started
-            trace = RetrievalTrace(channel_ids=channels, stage_seconds=stage_seconds)
+            trace = RetrievalTrace(
+                channel_ids={
+                    name: [card_id for card_id, _ in hits] for name, hits in channels.items()
+                },
+                channel_scores={
+                    name: {card_id: score for card_id, score in hits}
+                    for name, hits in channels.items()
+                },
+                stage_seconds=stage_seconds,
+            )
             first_stage = self._rrf(channels, 50)
             trace.first_stage_ids = first_stage
             card_map = self.database.load_cards(first_stage)
@@ -744,86 +785,70 @@ class StrongRetriever:
             trace.fused_ids = rerank_ids
             if not rerank_ids:
                 raise InsufficientEvidence("no candidates")
-            rerank_docs = [self._rerank_document(card_map[card_id]) for card_id in rerank_ids]
+            # The whole candidate pool goes to the answer model, which picks.
+            #
+            # Every stage between recall and the answer used to be a ranker, and
+            # rankers cannot say "none of these".  That forced a chain of gates -
+            # a rerank-score floor, confidence tiers, a topic-overlap gate, a
+            # required-facet gate - each guessing from a different angle at a
+            # question only a reader can settle: does this text answer what was
+            # asked?  Measured on ten colloquially phrased questions, that chain
+            # cited the right card 3 times out of 10 while the card itself was in
+            # the lexical pool all 10 times, usually in the top six.  Handing the
+            # same pool to the answer model cited it 10 times out of 10, and
+            # returned nothing at all for a faculty-privacy question, an
+            # off-campus question and another university's question, which is the
+            # judgement no ranker could make.  It also costs no extra call, since
+            # it replaces the reranker.
             started = time.perf_counter()
-            ranked = await self.models.rerank(plan.standalone_query, rerank_docs)
-            stage_seconds["reranker"] = time.perf_counter() - started
-            if len(ranked) != len(rerank_ids):
-                raise RetrievalUnavailable("reranker", "returned incomplete ranking")
-            ordered: list[CardEvidence] = []
-            seen_indexes: set[int] = set()
-            for index, score in ranked:
-                if index < 0 or index >= len(rerank_ids):
-                    raise RetrievalUnavailable("reranker", "returned invalid document index")
-                if index in seen_indexes:
-                    raise RetrievalUnavailable("reranker", "returned duplicate document index")
-                score = float(score)
-                if not math.isfinite(score) or not 0 <= score <= 1:
-                    raise RetrievalUnavailable("reranker", "returned invalid relevance score")
-                seen_indexes.add(index)
-                card = card_map[rerank_ids[index]]
-                card.rerank_score = score
-                ordered.append(card)
+            raw_selection = await self.models.select_evidence(
+                plan.standalone_query,
+                [self._candidate_document(card_map[card_id]) for card_id in rerank_ids],
+            )
+            stage_seconds["selector"] = time.perf_counter() - started
+            # Evidence first, official entry points only when there is none.
+            # Navigation cards reach the selector as a bare title, so a selector
+            # asked only "whose text answers this" can never pick one - which
+            # silently deleted the "here are the official pages" answer for 16 of
+            # the 25 questions the knowledge base does not cover yet.  Asking for
+            # the two separately keeps that answer while leaving the refusal
+            # judgement where it belongs: both lists empty is a valid reply, and
+            # it is what comes back for a teacher's phone number.
+            ordered = self._picked_cards(raw_selection, "picked", rerank_ids, card_map)
+            if not ordered:
+                ordered = self._picked_cards(
+                    raw_selection, "entry_points", rerank_ids, card_map
+                )
             trace.reranked_ids = [card.card_id for card in ordered]
-            rerank_tiers = self._rerank_tiers(ordered)
-            eligible = [
-                card for card in ordered if card.rerank_score >= self.min_rerank_score
-            ]
             fact_cards = [
                 card
-                for card in eligible
+                for card in ordered
                 if card.card_kind == "fact" and bool(card.evidence_quote)
             ]
             navigation_cards = [
                 card
-                for card in eligible
+                for card in ordered
                 if card.card_kind == "navigation" and not card.evidence_quote
             ]
-            # Card kind no longer decides precedence.  Navigation cards are the
-            # overwhelming majority of the reachable knowledge base, so a
-            # fact-first rule made them selectable only through the "required
-            # facets are missing" failure branch.  Both kinds now compete on the
-            # same fused rank and the leader decides whether this question is
-            # answered from evidence or from an official entry point.
-            pool_size = len(first_stage)
-            fact_cards = self._rank_fused(fact_cards, rerank_tiers, pool_size)
-            navigation_cards = self._rank_fused(navigation_cards, rerank_tiers, pool_size)
-            selectable = self._rank_fused(
-                [*fact_cards, *navigation_cards], rerank_tiers, pool_size
-            )
-            trace.selection_ids = [card.card_id for card in selectable]
-            if not selectable:
-                raise InsufficientEvidence("reranker selected no evidence")
-            # Both stages rank; neither can say "none of these are about it".
-            # Without this the pool always has a best member and the bot always
-            # has something to say.
-            leader_overlap = topic_overlap(plan.standalone_query, selectable[0])
-            if leader_overlap < MIN_TOPIC_OVERLAP:
-                raise InsufficientEvidence(
-                    f"nothing on this topic: best candidate echoes "
-                    f"{leader_overlap:.0%} of the question"
-                )
-            if selectable[0].card_kind == "fact":
-                source_groups: dict[str, list[CardEvidence]] = {}
-                for card in fact_cards:
-                    source_groups.setdefault(card.source_id, []).append(card)
-                selected = []
-                last_missing = list(plan.required_facets)
-                for same_source_cards in source_groups.values():
-                    candidate = same_source_cards[:4]
-                    last_missing = missing_required_facets(plan.required_facets, candidate)
-                    if not last_missing:
-                        selected = candidate
-                        break
-                if not selected:
-                    if navigation_cards:
-                        selected = navigation_cards[:MAX_NAVIGATION_CARDS]
-                    else:
-                        raise InsufficientEvidence(
-                            f"required facets missing from any single source: {', '.join(last_missing)}"
-                        )
+            trace.selection_ids = [card.card_id for card in ordered]
+            if not ordered:
+                raise InsufficientEvidence("no candidate answers this question")
+            # The selector's first pick decides what kind of answer this is, and
+            # the rest of the pick has to agree with it.  A mixed selection would
+            # cite a navigation card carrying no text beside a fact card that
+            # does, and mixing sources would attribute one page's rules to
+            # another's URL - so the leader's kind, and for evidence answers the
+            # leader's source, filter the rest.  Ordering is the model's, which
+            # is the point: a ranker cannot be trusted to lead, but a reader can.
+            leader = ordered[0]
+            if leader.card_kind == "fact" and leader.evidence_quote:
+                selected = [
+                    card for card in fact_cards if card.source_id == leader.source_id
+                ][:4]
             else:
                 selected = navigation_cards[:MAX_NAVIGATION_CARDS]
+            if not selected:
+                raise InsufficientEvidence("no candidate answers this question")
             parent_ids = list(
                 dict.fromkeys(card.parent_card_id for card in selected if card.parent_card_id)
             )
@@ -867,6 +892,53 @@ class StrongRetriever:
             raise RetrievalUnavailable("sqlite", str(exc)) from exc
         except Exception as exc:
             raise RetrievalUnavailable("retrieval", str(exc)) from exc
+
+    @staticmethod
+    def _candidate_document(card: CardEvidence) -> str:
+        """One line per candidate, as the selector sees it.
+
+        Navigation cards carry no evidence and no summary, so they are named
+        rather than quoted.  Saying so in the line matters: without it the model
+        reads a bare title as a card whose text it simply was not shown, and
+        picks it as though the text supported the answer.
+        """
+
+        body = card.evidence_quote or card.summary or "（无正文，仅为官方入口链接）"
+        return f"【{card.title}】{body}"
+
+    @staticmethod
+    def _picked_cards(
+        selection: dict[str, Any],
+        field: str,
+        candidate_ids: list[str],
+        card_map: dict[str, CardEvidence],
+    ) -> list[CardEvidence]:
+        """Resolve the selector's ordinals back to cards.
+
+        Ordinals rather than card ids, so a model that hallucinates produces an
+        out-of-range number instead of a plausible-looking id pointing at a card
+        it never saw.  Out-of-range and repeated numbers are dropped rather than
+        raised on: one bad index should not fail a question whose other picks
+        are sound.  A reply that is not a list at all is a broken contract and
+        does raise, because then nothing about the pick can be trusted.
+        """
+
+        picked = selection.get(field, [])
+        if not isinstance(picked, list):
+            raise ModelOutputRejected("selector", f"{field} is not a list")
+        cards: list[CardEvidence] = []
+        seen: set[str] = set()
+        for ordinal in picked:
+            if not isinstance(ordinal, int) or isinstance(ordinal, bool):
+                continue
+            if not 1 <= ordinal <= len(candidate_ids):
+                continue
+            card_id = candidate_ids[ordinal - 1]
+            if card_id in seen:
+                continue
+            seen.add(card_id)
+            cards.append(card_map[card_id])
+        return cards
 
     @staticmethod
     def _rerank_tiers(ordered: list[CardEvidence]) -> dict[str, int]:
@@ -959,11 +1031,21 @@ class StrongRetriever:
         )
 
     @staticmethod
-    def _rrf(channels: dict[str, list[str]], limit: int, k: int = 60) -> list[str]:
+    def _rrf(
+        channels: dict[str, list[tuple[str, float]]], limit: int, k: int = 60
+    ) -> list[str]:
+        """Fuse the channels by rank.
+
+        Deliberately still rank-based: the native scores now travel alongside so
+        that a caller can ask "is the best hit any good", but they are on four
+        different scales and mixing them into one number would invent a
+        comparison the data does not support.
+        """
+
         scores: dict[str, float] = {}
         best_rank: dict[str, int] = {}
-        for ids in channels.values():
-            for rank, card_id in enumerate(ids, 1):
+        for hits in channels.values():
+            for rank, (card_id, _score) in enumerate(hits, 1):
                 scores[card_id] = scores.get(card_id, 0.0) + 1.0 / (k + rank)
                 best_rank[card_id] = min(rank, best_rank.get(card_id, rank))
         ordered = sorted(scores, key=lambda card_id: (-scores[card_id], best_rank[card_id], card_id))

@@ -94,8 +94,16 @@ def judge(item: dict, answer, elapsed: float) -> tuple[str, str]:
     return "FAIL", f"no expected topic in the answer (wanted one of {expect})"
 
 
-async def run(items: list[dict], database: KnowledgeDatabase, models) -> int:
-    retriever = StrongRetriever(database, models, 0.35, fast_path_enabled=True)
+async def run(
+    items: list[dict],
+    database: KnowledgeDatabase,
+    models,
+    pace_seconds: float = 0.0,
+    vector_recall: bool = True,
+) -> int:
+    retriever = StrongRetriever(
+        database, models, 0.35, fast_path_enabled=True, vector_recall_enabled=vector_recall
+    )
     service = AnswerService(
         retriever, models, cache_ttl_seconds=0, cache_size=0,
         answer_mode="draft", answer_max_chars=300, answer_max_sources=3,
@@ -104,7 +112,13 @@ async def run(items: list[dict], database: KnowledgeDatabase, models) -> int:
     verdicts: dict[str, int] = {}
     rows: list[tuple[str, str, str, str, float]] = []
     try:
-        for item in items:
+        for position, item in enumerate(items):
+            # Unpaced, this set puts 44 questions through four endpoints as fast
+            # as they will answer, and the gateway starts refusing: one run came
+            # back with 12 of 44 as planner/embedding/reranker errors, which
+            # measures the gateway rather than the bot.
+            if position and pace_seconds:
+                await asyncio.sleep(pace_seconds)
             started = time.perf_counter()
             try:
                 async with asyncio.timeout(LATENCY_BUDGET_SECONDS + 5):
@@ -167,6 +181,17 @@ def main() -> int:
         default=REPO_ROOT / "releases/versions/20260807-draft/knowledge.sqlite",
     )
     parser.add_argument(
+        "--pace",
+        type=float,
+        default=6.0,
+        help="seconds to wait between questions, so the gateway does not throttle",
+    )
+    parser.add_argument(
+        "--no-vector",
+        action="store_true",
+        help="skip the embedding channel, which supplied 0 leading candidates when measured",
+    )
+    parser.add_argument(
         "--check-only",
         action="store_true",
         help="verify the set is still non-circular and exit, without calling the gateway",
@@ -206,7 +231,7 @@ def main() -> int:
             )
         )
         try:
-            return asyncio.run(run(items, database, models))
+            return asyncio.run(run(items, database, models, args.pace, not args.no_vector))
         finally:
             asyncio.run(models.close())
     finally:
