@@ -9,8 +9,11 @@ from pathlib import Path
 
 from ..attestation import ArtifactSnapshot
 from ..clients import (
+    OFFLINE_RETRY_POLICY,
+    ONLINE_RETRY_POLICY,
     ModelEndpoints,
     RemoteModels,
+    RetryPolicy,
     release_build_config,
     release_model_config,
 )
@@ -50,7 +53,12 @@ from .review import (
 from .tasks import generate_task_package, make_rescue_search_tasks, write_tasks
 
 
-def _settings_models(settings: Settings) -> RemoteModels:
+def _settings_models(
+    settings: Settings, retry_policy: RetryPolicy | None = None
+) -> RemoteModels:
+    """Build a client.  Callers with nobody waiting should pass the patient
+    policy; evaluation must not, because it measures user-facing latency."""
+
     return RemoteModels(
         ModelEndpoints(
             base_url=settings.model_base_url,
@@ -61,7 +69,8 @@ def _settings_models(settings: Settings) -> RemoteModels:
             answer_model=settings.answer_model,
             reranker_url=settings.reranker_url,
             timeout=settings.request_timeout,
-        )
+        ),
+        retry_policy=retry_policy or ONLINE_RETRY_POLICY,
     )
 
 
@@ -156,7 +165,9 @@ async def _build(args: argparse.Namespace) -> dict[str, object]:
     settings.validate()
     manager = ReleaseManager(settings.release_root)
     staging = manager.new_staging(args.version)
-    models = _settings_models(settings)
+    # Embeddings exist only in memory during a build and there is no resume, so
+    # a transient 429 that is not absorbed discards the whole run.
+    models = _settings_models(settings, retry_policy=OFFLINE_RETRY_POLICY)
     build_model_config = release_build_config(
         models.endpoints, embedding_dimension=settings.embedding_dimension
     )

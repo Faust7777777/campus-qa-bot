@@ -16,28 +16,49 @@ from .contracts import MAX_EMBEDDING_BATCH_SIZE, MAX_SEMANTIC_TEXT_CHARS
 from .errors import RetrievalUnavailable
 
 MAX_MODEL_RESPONSE_BYTES = 2 * 1024 * 1024
-# Five retries with a doubling backoff capped at 30s meant a single question
-# could sleep 2+4+8+16+30 = 60 seconds before failing, which is where the
-# observed 48-second tail came from.  Two retries with a short cap bound the
-# worst case to 1.5 seconds of sleeping.
-MAX_TRANSIENT_RETRIES = 2
-RETRY_BASE_DELAY_SECONDS = 0.5
-RETRY_MAX_DELAY_SECONDS = 4.0
 TRANSIENT_STATUS_CODES = frozenset({429, 502, 503, 504})
 
 
-def transient_retry_delay(attempt: int, retry_after: str = "") -> float:
-    """Backoff for one transient failure, honouring a bounded ``retry-after``.
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """How long to keep absorbing transient gateway failures.
 
-    A gateway asking for a long wait cannot hold a group question open
-    indefinitely, so the server's hint is clamped like any other delay.
+    Online and offline callers want opposite things from the same client, so
+    the budget is a parameter rather than a module constant.
     """
 
-    try:
-        delay = float(retry_after)
-    except (TypeError, ValueError):
-        delay = RETRY_BASE_DELAY_SECONDS * float(2**attempt)
-    return min(max(delay, RETRY_BASE_DELAY_SECONDS), RETRY_MAX_DELAY_SECONDS)
+    max_retries: int
+    base_delay_seconds: float
+    max_delay_seconds: float
+
+    def delay(self, attempt: int, retry_after: str = "") -> float:
+        """Backoff for one failure, honouring a bounded ``retry-after``.
+
+        A gateway asking for a very long wait is clamped like any other delay;
+        the server does not get to decide how long a caller blocks.
+        """
+
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            delay = self.base_delay_seconds * float(2**attempt)
+        return min(max(delay, self.base_delay_seconds), self.max_delay_seconds)
+
+
+# Someone in the group is waiting.  Five retries with a doubling backoff capped
+# at 30s let one question sleep 2+4+8+16+30 = 60 seconds before failing, which
+# is where the observed 48-second tail came from.  Fail fast and say so.
+ONLINE_RETRY_POLICY = RetryPolicy(
+    max_retries=2, base_delay_seconds=0.5, max_delay_seconds=4.0
+)
+# Nobody is waiting on a build, and there is no resume: embeddings live only in
+# memory, so one unabsorbed 429 discards every vector computed so far and the
+# whole ~101-request run starts over.  Waiting a minute is far cheaper than
+# that, and the full 3214-card build was originally produced under a budget
+# this generous.
+OFFLINE_RETRY_POLICY = RetryPolicy(
+    max_retries=6, base_delay_seconds=1.0, max_delay_seconds=30.0
+)
 
 
 MODEL_PROTOCOL_VERSION = "evidence-draft-v2"
@@ -234,8 +255,14 @@ def release_model_config(
 class RemoteModels:
     """Strict clients for OpenAI-compatible chat/embedding and rerank endpoints."""
 
-    def __init__(self, endpoints: ModelEndpoints, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        endpoints: ModelEndpoints,
+        client: httpx.AsyncClient | None = None,
+        retry_policy: RetryPolicy = ONLINE_RETRY_POLICY,
+    ) -> None:
         self.endpoints = endpoints
+        self.retry_policy = retry_policy
         self._owns_client = client is None
         self.client = client or httpx.AsyncClient(timeout=endpoints.timeout)
         self.headers = {"Authorization": f"Bearer {endpoints.api_key}"}
@@ -246,17 +273,18 @@ class RemoteModels:
 
     async def _post(self, component: str, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         last_error: Exception | None = None
-        for attempt in range(MAX_TRANSIENT_RETRIES + 1):
+        policy = self.retry_policy
+        for attempt in range(policy.max_retries + 1):
             try:
                 async with self.client.stream(
                     "POST", url, headers=self.headers, json=payload
                 ) as response:
                     if (
                         response.status_code in TRANSIENT_STATUS_CODES
-                        and attempt < MAX_TRANSIENT_RETRIES
+                        and attempt < policy.max_retries
                     ):
                         await asyncio.sleep(
-                            transient_retry_delay(
+                            policy.delay(
                                 attempt, response.headers.get("retry-after", "").strip()
                             )
                         )
@@ -280,8 +308,8 @@ class RemoteModels:
                 # now share one budget.  Protocol failures (4xx, oversized or
                 # malformed bodies) still fail immediately: retrying cannot help.
                 last_error = exc
-                if attempt < MAX_TRANSIENT_RETRIES:
-                    await asyncio.sleep(transient_retry_delay(attempt))
+                if attempt < policy.max_retries:
+                    await asyncio.sleep(policy.delay(attempt))
                     continue
                 break
             except Exception as exc:

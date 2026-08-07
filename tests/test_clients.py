@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -8,11 +9,12 @@ from luna_kb.clients import (
     MAX_MODEL_RESPONSE_BYTES,
     ModelEndpoints,
     RemoteModels,
+    OFFLINE_RETRY_POLICY,
+    ONLINE_RETRY_POLICY,
     _package_root,
     build_scoped_modules,
     release_build_config,
     release_model_config,
-    transient_retry_delay,
 )
 from luna_kb.errors import RetrievalUnavailable
 
@@ -313,14 +315,27 @@ async def test_healthcheck_probes_all_four_model_contracts() -> None:
     assert called_models == ["embedding", "reranker", "planner", "answer"]
 
 
-def test_transient_retry_delay_is_bounded_in_both_directions() -> None:
-    # The old backoff reached 30s per attempt over five attempts, so one
-    # question could sleep 60s before failing.
-    assert [transient_retry_delay(attempt) for attempt in range(3)] == [0.5, 1.0, 2.0]
+def test_online_retry_policy_fails_fast() -> None:
+    # Someone in the group is waiting; the old budget could sleep 60s.
+    policy = ONLINE_RETRY_POLICY
+    assert [policy.delay(attempt) for attempt in range(3)] == [0.5, 1.0, 2.0]
+    total = sum(policy.delay(attempt) for attempt in range(policy.max_retries))
+    assert total <= 2.0
     # A gateway cannot hold a group question open by asking for a long wait.
-    assert transient_retry_delay(0, "600") == 4.0
-    assert transient_retry_delay(0, "0.01") == 0.5
-    assert transient_retry_delay(0, "not-a-number") == 0.5
+    assert policy.delay(0, "600") == 4.0
+    assert policy.delay(0, "0.01") == 0.5
+    assert policy.delay(0, "not-a-number") == 0.5
+
+
+def test_offline_retry_policy_is_patient_enough_to_finish_a_build() -> None:
+    # A build has no resume: embeddings live in memory, so one unabsorbed 429
+    # discards every vector computed so far.  Waiting is much cheaper than that.
+    policy = OFFLINE_RETRY_POLICY
+    total = sum(policy.delay(attempt) for attempt in range(policy.max_retries))
+    assert total >= 60.0, "must at least match the budget the 3214-card build used"
+    assert policy.delay(99) == policy.max_delay_seconds
+    # Still bounded: the gateway does not get to block a build indefinitely.
+    assert policy.delay(0, "9999") == 30.0
 
 
 @pytest.mark.asyncio
@@ -432,3 +447,59 @@ def test_build_config_excludes_query_time_settings() -> None:
     assert "prompt_contract_sha256" not in config
     assert "reranker" not in config
     assert "request_timeout_seconds" not in config
+
+
+@pytest.mark.asyncio
+async def test_offline_policy_rides_out_a_burst_the_online_one_abandons(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Five consecutive 429s is what a ~101-request build can meet on this
+    # gateway.  The online budget gives up; the build budget absorbs it.
+    def make_handler() -> tuple[list[int], object]:
+        calls = [0]
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            calls[0] += 1
+            if calls[0] <= 5:
+                return httpx.Response(429)
+            return httpx.Response(
+                200, json={"data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+            )
+
+        return calls, handler
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("luna_kb.clients.asyncio.sleep", fake_sleep)
+
+    online_calls, online_handler = make_handler()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(online_handler))
+    models = RemoteModels(_endpoints(), client=client, retry_policy=ONLINE_RETRY_POLICY)
+    try:
+        with pytest.raises(RetrievalUnavailable):
+            await models.embed(["build me"])
+    finally:
+        await client.aclose()
+    assert online_calls[0] == ONLINE_RETRY_POLICY.max_retries + 1
+
+    offline_calls, offline_handler = make_handler()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(offline_handler))
+    models = RemoteModels(_endpoints(), client=client, retry_policy=OFFLINE_RETRY_POLICY)
+    try:
+        vectors = await models.embed(["build me"])
+    finally:
+        await client.aclose()
+    assert vectors == [[1.0, 0.0]]
+    assert offline_calls[0] == 6
+
+
+def test_only_the_build_path_asks_for_the_patient_budget() -> None:
+    # Evaluation must keep the online budget: it measures the latency a user
+    # would see, so absorbing a 30s stall there would hide the thing it gates.
+    import inspect
+
+    from luna_kb.pipeline import cli
+
+    assert "OFFLINE_RETRY_POLICY" in inspect.getsource(cli._build)
+    assert "OFFLINE_RETRY_POLICY" not in inspect.getsource(cli._evaluate)
