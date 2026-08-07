@@ -92,58 +92,6 @@ FACET_ALIASES = {
 }
 
 
-def canonical_facets(values: list[str]) -> set[str]:
-    concepts: set[str] = set()
-    for value in values:
-        compact = normalized_text(value)
-        if not compact:
-            continue
-        matched_concepts: set[str] = set()
-        for concept, aliases in FACET_ALIASES.items():
-            if any(normalized_text(alias) in compact for alias in aliases):
-                matched_concepts.add(concept)
-        if "申请" in matched_concepts and compact not in {
-            "申请",
-            "申报",
-            "application",
-            "apply",
-        }:
-            matched_concepts.remove("申请")
-        if (
-            "流程" in matched_concepts
-            and "流程" not in compact
-            and "步骤" not in compact
-            and not any(word in compact for word in ("process", "workflow", "procedure"))
-        ):
-            matched_concepts.remove("流程")
-        if matched_concepts:
-            concepts.update(matched_concepts)
-        else:
-            concepts.add(compact)
-    return concepts
-
-
-def missing_required_facets(required: list[str], cards: list["CardEvidence"]) -> list[str]:
-    # Required answer facets are an evidence-coverage gate, not a retrieval
-    # metadata gate. Luna-authored titles, summaries, facets and retrieval
-    # expansions may find a candidate but cannot prove that it contains the
-    # requested material, deadline, location, etc.
-    evidence_texts = [card.evidence_quote for card in cards if card.evidence_quote]
-    covered = canonical_facets(evidence_texts)
-    retrieval_text = normalized_text("\n".join(evidence_texts))
-    missing: list[str] = []
-    for raw in required:
-        concepts = canonical_facets([raw])
-        if not concepts:
-            continue
-        if not all(
-            concept in covered or normalized_text(concept) in retrieval_text
-            for concept in concepts
-        ):
-            missing.append(raw)
-    return missing
-
-
 @dataclass(slots=True)
 class QueryPlan:
     intent: str
@@ -214,7 +162,6 @@ class CardEvidence:
     canonical_url: str
     source_title: str
     published_at: str | None
-    rerank_score: float = 0.0
     # 1-based position in the fused first-stage pool; 0 means "never recalled",
     # which scores worse than any recalled card.
     first_stage_rank: int = 0
@@ -570,63 +517,6 @@ class KnowledgeDatabase:
             raise RetrievalUnavailable("sqlite", str(exc)) from exc
 
 
-# How far two reranker scores must separate before that difference counts as a
-# real preference instead of banding noise.
-#
-# Measured against the DLUT gateway over ten real questions: the full spread
-# across 8-16 candidates is 0.08-0.22, but the top of each distribution is
-# tight - the leading candidates typically sit within 0.005-0.03 of each other,
-# which is where selection actually happens.  So the reranker separates the
-# plainly irrelevant tail well and the plausible head barely at all, and this
-# margin is set to match: near-equal leaders share a tier and are ordered by
-# first-stage rank, while the tail falls into lower tiers and stays there.
-#
-# Revisit if the reranker is ever replaced by a calibrated one.
-RERANK_TIE_MARGIN = 0.05
-
-# How much of the question a candidate must echo before it counts as being
-# about the same thing.
-#
-# Removing fact-first precedence let navigation cards be selected, and some
-# navigation card always shares a few characters with any question, so the bot
-# began answering everything - including "怎样申请夜间无人机驾驶证", which it
-# served with the nearest-looking application page.  Restraint on out-of-scope
-# questions fell to zero.
-#
-# Calibrated on the frozen set rather than guessed.  With boilerplate removed
-# the two populations barely overlap: answerable questions sit at a median of
-# 0.55, out-of-scope ones at 0.00.
-#
-# The threshold is set where false refusals are still exactly zero, not where
-# refusal is most effective, because the two errors are not symmetric.  Every
-# answerable question this would refuse was one the bot had answered correctly:
-#
-#     0.05    refuses 63% of out-of-scope questions, loses 0 real answers
-#     0.10    refuses 77%,  loses 3
-#     0.15    refuses 88%,  loses 7
-#
-# and the seven are questions phrased the way a student actually asks - "大工食堂
-# 早餐、午餐和晚餐几点开放" against a card titled 校内食堂餐次与营业时间.  Low
-# overlap there means different wording, not a different subject.  A wrong
-# answer gets corrected in the group; a refusal on a real question is a failure
-# the person sees directly.  Raise this only with evidence that the questions it
-# starts refusing were not being answered well anyway.
-MIN_TOPIC_OVERLAP = 0.05
-
-
-# Bigrams that campus questions and campus cards both use regardless of topic.
-# Unweighted overlap let boilerplate carry a question over the line on its own:
-# "本科生怎样申请夜间无人机驾驶证" scored 0.21 against a scholarship card purely
-# on 本科 / 科生 / 申请, while "夜间无人机驾驶证在哪考" scored 0.00.  Phrasing
-# decided the outcome instead of subject matter.
-BOILERPLATE_TERMS = (
-    "本科生", "同学", "学生", "学校", "校区", "我校",
-    "怎么", "怎样", "如何", "哪里", "在哪", "什么", "多少", "是否", "可以", "需要",
-    "申请", "办理", "手续", "流程", "规定", "要求", "条件", "材料", "时间", "地点",
-    "通知", "相关", "有关", "进行", "提供", "开展",
-)
-
-
 # Audiences this bot does not serve.  The knowledge base is undergraduate-only,
 # and the topic gate cannot catch these: "研究生国家奖学金评审材料在哪" reads as
 # highly on-topic against the undergraduate scholarship cards, and answering it
@@ -665,39 +555,6 @@ def serves_another_audience(question: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _significant_bigrams(text: str) -> set[str]:
-    compact = normalized_text(text)
-    grams = {compact[i : i + 2] for i in range(len(compact) - 1)}
-    boilerplate: set[str] = set()
-    for term in BOILERPLATE_TERMS:
-        boilerplate |= {term[i : i + 2] for i in range(len(term) - 1)}
-    return grams - boilerplate
-
-
-def topic_overlap(question: str, card: "CardEvidence") -> float:
-    """Fraction of the question's *subject-bearing* bigrams the card echoes.
-
-    Deliberately lexical and local: it asks whether this card is about what was
-    asked, which is the one thing neither the reranker's banded scores nor the
-    first stage's ranking can express - both are relative, and a pool of
-    uniformly irrelevant cards still has a best member.
-
-    Boilerplate is removed from the question side only.  A card is free to be
-    written in whatever register it likes; what must match is the subject.
-    """
-
-    asked = _significant_bigrams(question)
-    if not asked:
-        return 1.0
-    text = normalized_text(f"{card.title}\n{card.source_title}\n{card.evidence_quote}")
-    echoed = {text[i : i + 2] for i in range(len(text) - 1)}
-    return len(asked & echoed) / len(asked)
-
-
-# When a question is answered by official entry points rather than by evidence,
-# offer the best few rather than a single arbitrary one.  A topic typically
-# spans several official pages, and the program attaches the links itself, so
-# there is no model in the loop that could confuse them.
 MAX_NAVIGATION_CARDS = 3
 
 
@@ -714,6 +571,11 @@ class StrongRetriever:
             raise ValueError("min_rerank_score must be between 0 and 1")
         self.database = database
         self.models = models
+        # Vestigial, deliberately.  Nothing reads this any more - the selector
+        # replaced the score floor it used to gate - but ``rerank_min_score`` is
+        # one of the model-config fields a release manifest records and
+        # release.py validates, so dropping the parameter would change the
+        # release schema to delete a number rather than to fix anything.
         self.min_rerank_score = min_rerank_score
         self.fast_path_enabled = fast_path_enabled
         # Measured over 44 realistic questions: the vector channel supplied the
@@ -939,96 +801,6 @@ class StrongRetriever:
             seen.add(card_id)
             cards.append(card_map[card_id])
         return cards
-
-    @staticmethod
-    def _rerank_tiers(ordered: list[CardEvidence]) -> dict[str, int]:
-        """Collapse reranker scores into confidence tiers.
-
-        The reranker earns influence in proportion to how much it actually
-        discriminates.  Cards scoring within ``RERANK_TIE_MARGIN`` of their tier
-        leader share a rank, so a degenerate band - every candidate within a few
-        thousandths, which is what the DLUT gateway returns - becomes a single
-        tier that cannot outvote anything, and the first stage decides.  A
-        reranker that genuinely separates candidates still splits them into
-        tiers and still wins.
-        """
-
-        ranks: dict[str, int] = {}
-        tier = 0
-        leader_score: float | None = None
-        for card in sorted(ordered, key=lambda card: -card.rerank_score):
-            if leader_score is None or leader_score - card.rerank_score > RERANK_TIE_MARGIN:
-                tier += 1
-                leader_score = card.rerank_score
-            ranks[card.card_id] = tier
-        return ranks
-
-    @staticmethod
-    def _rank_fused(
-        cards: list[CardEvidence],
-        rerank_tiers: dict[str, int],
-        pool_size: int,
-    ) -> list[CardEvidence]:
-        """Order cards by reranker confidence tier, then by first-stage rank.
-
-        The reranker leads, but only at the resolution it can justify.  Within a
-        single tier it has expressed no preference, so the first stage decides;
-        across tiers it overrides the first stage outright.  The rule therefore
-        slides between "trust the first stage" for a degenerate band and "trust
-        the reranker" for a well-separated one, without a weighting constant to
-        tune.
-
-        Ties are never broken by card kind.  Doing so would quietly reintroduce
-        the fact-first precedence this replaces, and navigation cards are the
-        majority of the reachable knowledge base.
-
-        Cards missing from either ranking sort last rather than being dropped,
-        so this can only reorder candidates, never remove one.
-        """
-
-        worst_first_stage = pool_size + 1
-        worst_tier = len(rerank_tiers) + 1
-
-        def sort_key(card: CardEvidence) -> tuple[int, int, str]:
-            first_stage = (
-                card.first_stage_rank
-                if card.first_stage_rank > 0
-                else worst_first_stage
-            )
-            return (rerank_tiers.get(card.card_id, worst_tier), first_stage, card.card_id)
-
-        return sorted(cards, key=sort_key)
-
-    @staticmethod
-    def _rerank_document(card: CardEvidence) -> str:
-        """Build the document the reranker scores.
-
-        Navigation cards carry no ``evidence_quote`` and no ``summary`` (0 of
-        3068 have one), so this is a bare title for them while a fact card gets
-        a whole paragraph.  That asymmetry looks like a handicap and has been
-        proposed as a fix more than once.  It was measured against the gateway
-        instead, same query and same candidate set, only the document changing:
-
-            navigation  n=18  mean length  34  mean score 0.9270
-            fact        n=43  mean length 190  mean score 0.8745
-            correlation(length, score) = -0.116
-
-        Navigation cards score *higher* while being far shorter, so the premise
-        is false - a bare title is a dense topical signal and a long excerpt
-        dilutes it.  Adding ``standard_question`` moved navigation scores by
-        -0.0117 on average and changed top-1 in 5 of 6 queries, helping twice
-        and hurting twice; adding ``retrieval_text`` was worse (-0.0182) and
-        would also require weakening the test that keeps Luna-generated text
-        out of ranking.  Neither is worth doing.
-
-        Keep this to audited fields with no generated expansion.
-        """
-
-        return "\n".join(
-            value
-            for value in (card.source_title, card.title, card.evidence_quote)
-            if value
-        )
 
     @staticmethod
     def _rrf(

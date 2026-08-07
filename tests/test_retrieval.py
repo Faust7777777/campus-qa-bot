@@ -11,15 +11,12 @@ from luna_kb.contracts import ReviewStatus, ReviewedCard, content_digest
 from luna_kb.errors import InsufficientEvidence, RetrievalUnavailable
 from luna_kb.pipeline.build import build_database
 from luna_kb.retrieval import (
-    MIN_TOPIC_OVERLAP,
     CardEvidence,
     KnowledgeDatabase,
     QueryFilters,
     QueryPlan,
     StrongRetriever,
-    missing_required_facets,
     serves_another_audience,
-    topic_overlap,
 )
 from luna_kb.vector import load_sqlite_vec
 
@@ -154,43 +151,6 @@ def test_allocator_reserves_several_navigation_slots_without_growing_budget() ->
         "nav-c",
     ]
     assert len([card_id for card_id in allocated if card_id.startswith("fact-")]) == 13
-
-
-def test_required_facets_match_across_chinese_and_english_labels() -> None:
-    card = _evidence("hukou", "hukou", "materials-and-location")
-    card.facets = ["materials", "location", "contact"]
-    card.title = "新生落户材料和办理地点"
-    card.summary = "包含全部办理信息。"
-    card.evidence_quote = "申请材料包括录取通知书，办理地点为服务大厅，咨询电话以官网公布为准。"
-
-    assert missing_required_facets(["申请材料", "办理地点", "咨询电话"], [card]) == []
-    assert missing_required_facets(["办理期限"], [card]) == ["办理期限"]
-
-
-def test_generated_metadata_cannot_fake_required_evidence_facets() -> None:
-    card = _evidence("hukou", "hukou", "materials-and-location")
-    card.title = "落户材料、地点和电话"
-    card.summary = "包含材料、办理地点和咨询电话。"
-    card.facets = ["materials", "location", "contact"]
-
-    assert missing_required_facets(["申请材料", "办理地点", "咨询电话"], [card]) == [
-        "申请材料",
-        "办理地点",
-        "咨询电话",
-    ]
-
-
-def test_reranker_document_excludes_generated_retrieval_claims() -> None:
-    card = _evidence("scholarship", "scholarship", "deadline")
-    card.summary = "模型生成的错误截止日期是明天。"
-    card.retrieval_text = "模型扩写：明天截止，必须线下办理。"
-
-    document = StrongRetriever._rerank_document(card)
-
-    assert card.evidence_quote in document
-    assert card.source_title in document
-    assert "错误截止日期" not in document
-    assert "必须线下办理" not in document
 
 
 def test_query_plan_enforces_undergraduate_audience_and_normalizes_campus() -> None:
@@ -784,113 +744,6 @@ async def test_navigation_only_pool_answers_instead_of_refusing(
         database.close()
 
 
-def test_rank_fusion_reorders_candidates_without_dropping_any() -> None:
-    # Ordering-only invariant: the selector may reorder candidates but must
-    # never remove one, otherwise it becomes a hidden evidence gate.
-    cards = []
-    for index, (first_stage_rank, card_id) in enumerate(
-        [(3, "c"), (1, "a"), (0, "unranked"), (2, "b")]
-    ):
-        card = _evidence(card_id, "subject", f"fact-{index}")
-        card.first_stage_rank = first_stage_rank
-        cards.append(card)
-    tiers = {"a": 4, "b": 2, "c": 1}
-
-    ordered = StrongRetriever._rank_fused(cards, tiers, pool_size=50)
-
-    assert sorted(card.card_id for card in ordered) == sorted(
-        card.card_id for card in cards
-    )
-    # Tier leads, so c (tier 1) then b (tier 2) then a (tier 4); "unranked" is
-    # in no tier and has no first-stage rank, so it always sorts last.
-    assert [card.card_id for card in ordered] == ["c", "b", "a", "unranked"]
-
-
-def test_rank_fusion_lets_the_first_stage_outweigh_a_banded_reranker() -> None:
-    # A banded reranker puts both cards in one tier, which means it expressed no
-    # preference at all.  The first stage then decides, even though the reranker
-    # scored the off-topic card marginally higher.
-    off_topic = _evidence("off-topic", "subject", "fact-1")
-    off_topic.first_stage_rank = 30
-    off_topic.rerank_score = 0.929
-    on_topic = _evidence("on-topic", "subject", "fact-2")
-    on_topic.first_stage_rank = 1
-    on_topic.rerank_score = 0.911
-
-    cards = [off_topic, on_topic]
-    tiers = StrongRetriever._rerank_tiers(cards)
-
-    assert tiers == {"off-topic": 1, "on-topic": 1}
-    ordered = StrongRetriever._rank_fused(cards, tiers, pool_size=50)
-    assert [card.card_id for card in ordered] == ["on-topic", "off-topic"]
-
-
-def test_rerank_tiers_collapse_a_degenerate_band() -> None:
-    # The observed gateway band: obviously unrelated documents land within
-    # 0.018 of each other.  That is not a preference, so it must not outvote
-    # the first stage.
-    cards = []
-    for card_id, score in (("a", 0.929), ("b", 0.925), ("c", 0.911)):
-        card = _evidence(card_id, "subject", card_id)
-        card.rerank_score = score
-        cards.append(card)
-
-    assert StrongRetriever._rerank_tiers(cards) == {"a": 1, "b": 1, "c": 1}
-
-
-def test_rerank_tiers_still_let_a_confident_reranker_win() -> None:
-    # Guard against over-correcting: a reranker that genuinely separates
-    # candidates keeps its authority even against a better first-stage rank.
-    weak_first_stage = _evidence("confident", "subject", "fact-1")
-    weak_first_stage.first_stage_rank = 12
-    weak_first_stage.rerank_score = 0.95
-    strong_first_stage = _evidence("rejected", "subject", "fact-2")
-    strong_first_stage.first_stage_rank = 1
-    strong_first_stage.rerank_score = 0.20
-
-    cards = [weak_first_stage, strong_first_stage]
-    tiers = StrongRetriever._rerank_tiers(cards)
-
-    assert tiers == {"confident": 1, "rejected": 2}
-    ordered = StrongRetriever._rank_fused(cards, tiers, pool_size=50)
-    assert [card.card_id for card in ordered] == ["confident", "rejected"]
-
-
-def test_topic_overlap_separates_a_matching_card_from_an_unrelated_one() -> None:
-    # The gate that stopped the bot answering "怎样申请夜间无人机驾驶证" with the
-    # nearest-looking application page.  Neither stage can express "none of
-    # these are about it": both rank, and a pool of uniformly irrelevant cards
-    # still has a best member.
-    card = _evidence("scholarship", "scholarship", "apply")
-    card.title = "本科生专项奖学金申请办理"
-    card.source_title = "本科生专项奖学金申请办理"
-    card.evidence_quote = ""
-
-    assert topic_overlap("奖学金怎么申请", card) >= MIN_TOPIC_OVERLAP
-    assert topic_overlap("夜间无人机驾驶证怎么办理", card) < MIN_TOPIC_OVERLAP
-
-
-def test_boilerplate_alone_cannot_carry_a_question_over_the_line() -> None:
-    # Campus questions and campus cards share a register - 本科生 / 申请 / 办理 -
-    # and unweighted overlap let that shared register decide the outcome:
-    # "本科生怎样申请夜间无人机驾驶证" scored 0.21 against a scholarship card
-    # purely on phrasing, while the same question without the boilerplate
-    # scored 0.00.  Subject matter has to carry it, not register.
-    card = _evidence("scholarship", "scholarship", "apply")
-    card.title = "本科生专项奖学金申请办理"
-    card.source_title = "本科生专项奖学金申请办理"
-    card.evidence_quote = ""
-
-    assert topic_overlap("本科生怎样申请夜间无人机驾驶证", card) < MIN_TOPIC_OVERLAP
-    assert topic_overlap("本科生如何办理校内宠物饲养许可证", card) < MIN_TOPIC_OVERLAP
-
-
-def test_topic_overlap_admits_an_empty_question_rather_than_refusing() -> None:
-    # A degenerate question is the caller's problem, not a reason to invent a
-    # refusal path here.
-    assert topic_overlap("", _evidence("a", "a", "a")) == 1.0
-
-
 @pytest.mark.asyncio
 async def test_an_off_topic_question_is_declined_rather_than_answered(
     tmp_path: Path,
@@ -976,22 +829,3 @@ def test_another_audience_is_recognised_by_who_acts_not_who_is_mentioned() -> No
     assert serves_another_audience("推免研究生的名额怎么排？") is None
 
 
-def test_topic_gate_scores_the_queries_that_actually_ran() -> None:
-    # The planner translates register: 打工 becomes 勤工助学, 清场 becomes 闭馆,
-    # and retrieval runs on those.  Scoring the gate on the user's original
-    # wording rejected cards the translated subquery had correctly found - all
-    # ten colloquial test questions failed this way, several with the right card
-    # at rank 1.
-    card = _evidence("qgzx", "qgzx", "hours")
-    card.title = "勤工助学工作时长原则"
-    card.source_title = "勤工助学管理办法"
-    card.evidence_quote = "学生参加勤工助学的时间原则上每周不超过8小时。"
-
-    colloquial = "校内打工一星期最多能干几个钟头"
-    translated = "学生勤工助学时间限制政策"
-
-    assert topic_overlap(colloquial, card) < MIN_TOPIC_OVERLAP
-    assert topic_overlap(translated, card) >= MIN_TOPIC_OVERLAP
-    # The gate takes the best over every query that ran, so the translation
-    # rescues the card the original wording would have thrown away.
-    assert max(topic_overlap(q, card) for q in (colloquial, translated)) >= MIN_TOPIC_OVERLAP

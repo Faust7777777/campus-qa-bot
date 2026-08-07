@@ -260,10 +260,12 @@ class AnswerService:
         except Exception as exc:
             raise RetrievalUnavailable("answer_model", str(exc)) from exc
         card_map = {card.card_id: card for card in evidence_cards}
-        top_card = max(
-            (card_map[card_id] for card_id in cited_ids),
-            key=lambda card: card.rerank_score,
-        )
+        # Evidence arrives in the selector's order, so the leading cited card is
+        # the first one the selector chose.  This used to sort by rerank score,
+        # which the selector replaced: the field is now always zero, and a
+        # max() over zeroes silently returns whichever card came first anyway.
+        cited = set(cited_ids)
+        top_card = next(card for card in evidence_cards if card.card_id in cited)
         citations: list[SourceCitation] = []
         seen_urls: set[str] = set()
         for card_id in cited_ids:
@@ -407,7 +409,7 @@ class AnswerService:
                 if text not in card_map[ids[0]].evidence_quote:
                     raise ModelOutputRejected("evidence_gate", "strict answer is not extractive")
         if not cited_ids:
-            cited_ids.append(max(cards, key=lambda card: card.rerank_score).card_id)
+            cited_ids.append(cards[0].card_id)
             notes.append("fallback_top_evidence")
         return answer, cited_ids, bool(notes), tuple(dict.fromkeys(notes))
 
