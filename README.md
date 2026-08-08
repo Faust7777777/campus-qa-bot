@@ -1,109 +1,131 @@
 # Campus QA Bot
 
-面向商学院本科生 QQ 群的证据辅助答疑机器人。运行时只读取已发布的只读知识库，不抓网页、不在线修改知识卡；关键检索环节故障会明确提示，回答模型可以在证据基础上自然改写，低置信度草案也直接发送。
+面向大连理工大学商学院本科生 QQ 群的答疑机器人。每一句回答都出自学校官方页面的**原文摘录**，并附上该页面的真实链接；知识库里没有的，它说没有。
 
-本地实现、Luna 清洗合并和安全审计已完成；资产会以只读交接包形式放到 VPS，暂不启动 Bot 或改动现有 NapCat / Minecraft Bridge 服务。
+```
+你：  体育测试成绩好能不能不上体育课？
+Bot： 盘锦校区自2025年秋季学期试行体测优秀免修体育课程制度，由公共基础学院
+      于每学年上学期开学第一周内组织申请……
 
-## 模型网关
-
-四个模型角色统一使用大连理工大学大模型网关 `http://aigw.dlut.edu.cn/v1`，不要把 API key 写入仓库、交接包或日志。已用脱敏测试 Key 验证：网关的模型目录包含 `Qwen3.5-9B`、`bge-m3`、`Qwen3-Reranker-8B` 和 `Qwen3.5-35B-A3B`；`bge-m3` 的 `/embeddings` 返回 1024 维有效向量，`Qwen3-Reranker-8B` 的 `/rerank` 和两个 Chat 模型的 `/chat/completions` 均返回 200。模型页面只展示 Chat 端点并不代表 Embedding 路由不可用，具体探测记录见 [docs/model-gateway-validation.md](docs/model-gateway-validation.md)。
-
-`.env.example` 已按该网关填写默认模型名；实际部署只需在 VPS 的运行时环境注入新 API key。网关额度、分组价格和可用性仍以控制台为准。
-
-## 本地开发
-
-```powershell
-python -m pip install -e ".[dev]"
-python -m pytest
+      参考来源：
+      [1] 体测优秀免修体育课程规则  https://yx.dlut.edu.cn/...
 ```
 
-项目数据生产链与运行时隔离：Luna 只负责离线抓取、清洗和候选卡生成；Codex 负责审核、冲突处理、评测和只读版本发布。
+- **不编造**——回答只能基于检索到的卡片，答案里出现的链接只要不在证据中就判为伪造并拒绝
+- **不答老师私事**——教师数据在构建期就被排除在知识库之外，不是靠提示词请求它别说
+- **听得懂口语**——「食堂好吃不」「拉几个人才能开社团」都算提问，不必写成公文，也不必带问号
+- **接得住追问**——先问「图书馆几点关门」，再问「那要几个人才能订」，它知道第二句在说研修间
 
-## 检索与证据口径
+完整说明见 [`docs/bot-manual.html`](docs/bot-manual.html)。
 
-- 线上采用精确匹配、加权 BM25、中文三元组、sqlite-vec 四路召回，再经 RRF 和 Reranker；任一路关键依赖异常都明确报错，不降级为模型常识回答。
-- 受众由程序固定为本科生；指定校区查询仍保留空校区和“全校”卡。
-- 回答正文默认最多300字，模型不得生成链接；允许基于已选卡忠实改写、压缩和跨卡组织，输出 `confidence`、`needs_review` 与可选来源提示；这些只写入内部质量记录，不会阻塞发送。
-- 程序只硬校验答案非空、长度、模型不得伪造 URL、引用卡必须来自检索结果；不再用字符串包含关系判断“是否忠实改写”。
-- 默认 `LUNA_ANSWER_MODE=draft`；`strict` 仅用于审计回归，不是生产口径。
-- 父卡上下文不仅要同源，还必须在构库时覆盖子卡的时效、校区和受众证据作用域；运行时会按当前查询再验一次，防止旧版或手工修改的数据库把历史/异校区父文带进回答。
-- RRF 仍保留Top50，但会先装载完整候选池，再在固定12张预算内优先覆盖独立事实；同一事实最多保留2个不同来源交给 Reranker 判断，并预留1张干净导航卡。不会因前24名重复卡过多而饿死后续独立事实，也不会增加远端精排调用量。
-- 只有无原文导航卡命中时，程序直接给出无事实的官方页面提示，不调用回答模型。
-- `kb_faculty.csv` 只用于隔离审计和负样本评测，不进入候选卡、Embedding 或生产库。
+## 核心设计：让模型读候选，而不是打分排序
 
-### 回答质量口径
+召回之后不接重排模型，而是把**整个候选池的标题和正文**一次性交给答案模型，请它读完后挑出真正能回答问题的卡片，或者明确表示一张都不行。
 
-回答是“证据辅助草案”，不是逐字转录。程序保留真实来源、模型置信度和 `quality_notes`，但草案直接发送；你在群里指出问题后再修知识卡或提示词。评测输出质量报告而非把每个改写错误都变成发布阻断。伪造链接和 faculty 泄漏仍是硬安全门。
+这不是偏好，是实测换来的。原先的链路是「重排打分 → 分数阈值 → 置信档 → 字面重合度门 → 单一来源功能面覆盖门」，在 30 道口语改写题上只对 23 道，而**正确卡片一次都没从召回池里丢过**：
 
-## Luna 批处理
+| 失效环节 | 实测 |
+|---|---|
+| 重排模型 | 给所有候选打 0.85~0.96，几乎不分辨；「毕业生集体户口迁出」同时当上社团题和学费题的第一名 |
+| 字面重合度门 | 必须拒答的问题重合 38%~67%，应该回答的 15%~60%，两组完全重叠，不存在能分开的阈值 |
+| 功能面覆盖门 | 单一来源正文中位数只覆盖 2 个功能面，而规划器常要求 3~5 个，结构性不可满足 |
 
-已有 URL 和描述的 `verify_refresh_and_extract` 任务先做禁网清洗；缺正文或缺 URL 的任务另建工作区联网处理，不能混批。
+换成让模型读之后同样 30 道题对 28~29 道，并且能做出排序器做不到的判断——面对「明天大连下雨吗」「商学院王老师的手机号」它返回空列表。**代价为零**：它替换了重排模型，网关调用次数不变，延迟中位从 6.26s 降到 4.86s，并且删掉了约 300 行阈值代码。
 
-```powershell
-campus-qa-kb luna-prepare `
-  --tasks work\luna_tasks.jsonl `
-  --workspace work\luna_workspace_v5 `
-  --instructions docs\luna-worker-protocol.md `
-  --clean-instructions docs\luna-clean-protocol.md `
-  --batch-size 5 `
-  --max-batch-chars 12000 `
-  --utf8-json `
-  --lanes core_kb secondary_kb `
-  --actions verify_refresh_and_extract
+> 排序器只能回答「哪张最像」，无法回答「有没有」。而「这段文字到底能不能回答这个问题」只有读者能判断。
 
-pwsh -NoProfile -File scripts\run_luna_cleaning.ps1 `
-  -Workspace work\luna_workspace_v5 `
-  -MaxBatches 37 `
-  -Model gpt-5.6-luna `
-  -BatchTimeoutMinutes 12
+## 检索链路
+
+```
+消息过滤      白名单 → 噪声 → 是否提问          本机，零成本
+查询计划      词法提取校区，单轮不调用模型         本机
+四路召回      BM25 / 精确 / 三元组 / 向量        本机，用户原话始终参与
+融合分配      RRF 前 50 现行卡 + 8 张往年附加位   本机
+选卡          答案模型读完全部候选后挑            网关
+生成          仅基于选中卡片，300 字以内          网关
+引用校验      伪造链接一律拒绝，链接由程序附加      本机
 ```
 
-运行状态写入 `state/status.jsonl`，确定性报告写入 `reports/`，每批日志写入 `logs/`。runner 对每批设置硬超时，输出不通过时只做一次禁网契约修复。
+多轮追问会额外调用一次小模型做指代消解，且其改写是**加法**——用户原话始终留在检索里，猜错只会多几张候选，不会弄丢答案。
 
-全部批次结束后重新校验并合并；默认有任一缺失或失败批次就拒绝生成全集：
+其他运行时约束：受众程序固定为本科生；现行卡与往年通知分开召回，往年只有 8 张附加位（全库 3251 张中 2879 张是往年通知，混在一起会淹掉现行的）；父卡上下文必须同源且覆盖子卡的时效、校区、受众作用域。
 
-```powershell
-campus-qa-kb luna-collect `
-  --workspace work\luna_workspace_v5 `
-  --output work\luna_v5_collected.jsonl
-```
+## 实测
 
-只有阶段性检查时才可加 `--allow-partial`；partial 文件不能进入正式审核和发布。
+| 测量项 | 改造前 | 现在 |
+|---|---:|---:|
+| 30 道口语改写题引用命中 | 23 | 28–29 |
+| 8 道多轮追问 | 8 | 8 |
+| 44 题冒烟集通过 | 26 | 33 |
+| 6 道必须拒答 | 3 | 5–6 |
+| 单轮延迟中位 | 6.26s | 4.86s |
 
-已知 URL 的 `fetch_failed` 不重复撞同一死链接。v6 全量收集后，将失败项转换为新的官方搜索任务，再交给 Luna 独立处理：
+三套测试集都在 [`evaluation/`](evaluation/)，题目均按群聊口语重写、与卡片索引文字无重叠。183 项单元测试，离线回放 200 题的召回与分配存活均为 200/200。
 
-```powershell
-campus-qa-kb rescue-search-tasks `
-  --tasks work\luna_tasks.jsonl `
-  --results work\luna_v6_collected.jsonl `
-  --output work\luna_v6_rescue_tasks.jsonl
-```
+## 快速开始
 
-转换后保留原 `source_id`，清空待抓 URL，并把原链接标为“仅供定位、不可作证据”。
-
-站群文章无需全部抓取即可先形成只读导航目录：
-
-```powershell
-campus-qa-kb catalog `
-  --web <交接包>/data/web_plus_index.csv `
-  --output work\source_catalog_2026_v2_reviewed.jsonl `
-  --report work\source_catalog_2026_v2_review.json `
-  --as-of-year 2026
-```
-
-目录卡只有官方标题和链接，没有正文、事实或模型摘要；命中时走程序生成的导航回复。Luna 后续仅按评测缺口和高频问题抓取文章，将少量目录卡升级为带逐字证据的事实卡。`review-merge` 只允许同一 URL 的 `catalog_only → success` 单向升级；URL 漂移或两个不同正文修订会 fail-closed。
-
-GitHub 项目对比与不部署完整 RAG 平台的依据见 [docs/github-project-review.md](docs/github-project-review.md)。
-
-## 当前验证
-
-```powershell
+```bash
+uv sync
 python -m pytest -q
-python scripts\benchmark_retrieval.py `
-  --output work\benchmark_v2 `
-  --cards 3652 `
-  --dimension 1024 `
-  --iterations 80
+
+# 离线：不调用网关，验证召回与候选分配
+python scripts/replay_gold_survival.py
+
+# 联网：需要 LUNA_MODEL_BASE_URL 与 LUNA_MODEL_API_KEY
+python scripts/run_paraphrase_set.py --no-vector --out work/run.jsonl
+python scripts/run_smoke_set.py --no-vector
 ```
 
-当前154项测试通过；3652卡、1024维的四路并行本地召回在Windows复测中 P95 为29.9ms，包含Top50装载和12张候选分配的完整本地检索前端 P95 为31.7ms；2个并发请求的200次压力检查无结果不一致，双请求批次 P95 为58.1ms。该数字不是ARM64 VPS承诺值，1.5核容器仍需实机复测。模型响应体硬限制2MiB，离线 Embedding 每批最多32卡，会话历史最多保留2048个活跃用户键，消息去重表最多保留4096个 ID；构库和评测以同一份不可变输入字节同时解析与计算摘要。正式评测逐题生成评测账本，发布门从账本重算题型、Recall、最终引用、克制率和延迟，不接受手写 passing 汇总；账本不保存 faculty 正文或问题原文。faculty 评测还必须绑定交接包中固定85条隔离集的已批准 SHA-256，替换文件、空行或重复行不能获得发布资格。构库、评测和运行时绑定同一非密钥模型配置及代码哈希，启动就绪会探测 Planner、Embedding、Reranker、Answer 四个模型契约，任一不一致会拒绝启动。大工网关四模型端点已于2026-08-06实测通过；300题评测集已由用户确认并按原始字节冻结为 `work/evaluation_20260807.jsonl`，SHA-256 为 `184c8bebab44d6f41e62939482b9e3677803a29d987f5083795d4d540c2a8334`，冻结记录为 `work/evaluation_20260807_freeze.json`。正式 `knowledge.sqlite` 尚未发布：构库和评测仍需运行时注入轮换后的网关密钥。Luna 最终审核已闭合：3227 张卡（approved 3024、downgraded 190、rejected 13、pending 0、conflict 0），审核 JSONL SHA-256 为 `7bead5d33b2b3022f2da59088bb12cbba842985c56c6a1dbb80ef739f6e64f20`。VPS 只需接收资产、注入运行时密钥并完成 QQ/NapCat 登录接入。
+评测脚本每题算完立即追加落盘，中断后重跑会跳过已完成的题。
+
+### 部署
+
+```bash
+cp .env.example .env      # 填网关密钥、群/私聊白名单
+docker compose up -d --build
+```
+
+容器以只读根文件系统运行，丢弃全部 capability，只读挂载发布库。QQ 协议层用 [NapCat](https://github.com/NapNeko/NapCatQQ)（OneBot 11），通过 Docker 网络以容器名互访，不对公网暴露端口。
+
+**网关密钥只存在于 `.env`（已在 `.gitignore`），不进仓库、不进日志、不进任何交接包。**
+
+## 知识库
+
+一条知识是一张「卡」，含标题、原文摘录、来源 URL、适用校区、现行与否。构建期有一条硬约束：**事实卡的原文摘录必须逐字出现在来源页面正文里**，否则构建失败——这是「不编造」在工程上的落点。
+
+```bash
+python -m luna_kb.pipeline.cli build \
+  --reviewed work/reviewed.jsonl --review-report work/report.json --version 20260810
+python -m luna_kb.pipeline.cli activate --version 20260810
+```
+
+构建带向量缓存（默认 `work/embedding_cache.bin`），键是**实际被嵌入的那段文字**的摘要而非卡片编号：改了文字就重算，改编号或调顺序则复用。新增 5 张卡时网关调用从约 102 次降到 1 次。缓存损坏或缺失按「没有缓存」处理，不会导致构建失败。
+
+发布目录不可变，`releases/current.json` 指向当前版本，切换是一次原子指针替换。
+
+## 项目结构
+
+```
+src/luna_kb/
+  retrieval.py        召回、融合、候选分配、选卡
+  service.py          答案生成、引用校验、URL 白名单
+  policy.py           消息过滤：噪声、提问识别、白名单
+  application.py      消息处理与限流
+  release.py          发布校验与激活
+  pipeline/           构建、评测、命令行
+scripts/              抓取、抽取、审核、评测、离线回放
+evaluation/           三套非循环测试集
+docs/                 设计记录与说明书
+```
+
+## 已知局限
+
+1. **知识库有缺口。** 44 题冒烟集中 25 道是已知未覆盖事项（重修、绩点、快递、班车、体检报销等），问到会给官方入口链接或直说没有。
+2. **不保证时效。** 保证「引文出自这个页面」，不保证「页面此刻仍有效」。涉及日期金额请点开链接核对。
+3. **正式评测未通过。** 项目定义了一套 240 题、11 项阈值的发布评测，当前版本未跑通即上线，属于自用取舍；README 中数字来自上述三套非循环测试集。
+4. **回答会改写原文。** 默认 `LUNA_ANSWER_MODE=draft`，答案是对证据的忠实压缩而非逐字引用；`strict` 仅用于审计回归。
+5. **依赖校内网关。** 网关异常时明确报错，不降级为模型常识回答。
+
+## 说明
+
+本项目为个人自用，与大连理工大学官方无关。知识库内容（`releases/`、`work/`）为抓取的官方公开页面，不随仓库分发。
