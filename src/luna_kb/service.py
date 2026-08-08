@@ -432,7 +432,11 @@ class Runtime:
         self.database = database
         self.models = models
         self.retriever = StrongRetriever(
-            database, models, settings.rerank_min_score, settings.fast_path_enabled
+            database,
+            models,
+            settings.rerank_min_score,
+            settings.fast_path_enabled,
+            settings.vector_recall_enabled,
         )
         self.answers = AnswerService(
             self.retriever,

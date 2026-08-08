@@ -31,6 +31,10 @@ class Settings:
     answer_max_chars: int = 300
     answer_max_sources: int = 3
     fast_path_enabled: bool = True
+    # The vector channel costs one gateway call per question.  Whether it
+    # earns it has not been measured since the selector replaced the
+    # reranker, and until this existed there was no way to turn it off.
+    vector_recall_enabled: bool = True
     reranker_url: str = ""
     rerank_min_score: float = 0.35
     request_timeout: float = 8.0
@@ -67,6 +71,8 @@ class Settings:
             answer_max_chars=int(os.getenv("LUNA_ANSWER_MAX_CHARS", "300")),
             answer_max_sources=int(os.getenv("LUNA_ANSWER_MAX_SOURCES", "3")),
             fast_path_enabled=os.getenv("LUNA_FAST_PATH_ENABLED", "true").strip().lower()
+            in {"1", "true", "yes", "on"},
+            vector_recall_enabled=os.getenv("LUNA_VECTOR_RECALL_ENABLED", "true").strip().lower()
             in {"1", "true", "yes", "on"},
             reranker_url=os.getenv("LUNA_RERANKER_URL", f"{base_url}/rerank"),
             rerank_min_score=float(os.getenv("LUNA_RERANK_MIN_SCORE", "0.35")),
