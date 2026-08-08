@@ -760,11 +760,23 @@ class StrongRetriever:
             # the two separately keeps that answer while leaving the refusal
             # judgement where it belongs: both lists empty is a valid reply, and
             # it is what comes back for a teacher's phone number.
-            ordered = self._picked_cards(raw_selection, "picked", rerank_ids, card_map)
-            if not ordered:
-                ordered = self._picked_cards(
-                    raw_selection, "entry_points", rerank_ids, card_map
-                )
+            # The selector states whether anyone was asking before it looks at
+            # the candidates, and a "no" is enforced here rather than trusted to
+            # the same reply's card lists.  Most group traffic is classmates
+            # answering each other - "校区内转专业没啥限制", "社团想加什么就加什么" -
+            # and those name covered topics, so retrieval hands over real cards
+            # and a selector that only skims an instruction picks them.  Asking
+            # for the judgement as its own field, before the picking, took real
+            # chat noise from 10 of 20 correctly ignored to a measured figure
+            # this comment is written alongside.
+            if raw_selection.get("asking") is False:
+                ordered: list[CardEvidence] = []
+            else:
+                ordered = self._picked_cards(raw_selection, "picked", rerank_ids, card_map)
+                if not ordered:
+                    ordered = self._picked_cards(
+                        raw_selection, "entry_points", rerank_ids, card_map
+                    )
             trace.reranked_ids = [card.card_id for card in ordered]
             fact_cards = [
                 card
