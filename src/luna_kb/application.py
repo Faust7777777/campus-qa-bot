@@ -52,6 +52,14 @@ class CampusQaApplication:
         key = (message.group_id, message.user_id)
         admission = self.gate.admit(message.message_id, key)
         if not admission.accepted:
+            # A cooldown that says nothing is indistinguishable from a broken
+            # bot.  The clock starts when the previous message arrived, not when
+            # its answer finished, and an answer takes five to nine seconds - so
+            # anyone who types a second question while waiting gets silence.
+            # In a group that silence is the right trade; one-to-one it is not,
+            # and the sender is talking to the bot on purpose.
+            if message.group_id is None and admission.reason == "user_cooldown":
+                return "上一个问题还在查，请稍等几秒再发。"
             return None
         if self.answers is None:
             return "检索服务暂时异常，请稍后再试。错误编号：STARTUP"

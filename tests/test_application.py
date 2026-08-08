@@ -163,3 +163,51 @@ async def test_execution_queue_full_is_reported_by_the_application() -> None:
     )
 
     assert response == "当前提问较多，队列已满，请稍后再试。"
+
+
+
+@pytest.mark.asyncio
+async def test_a_private_sender_is_told_they_are_on_cooldown() -> None:
+    # Silence is indistinguishable from a broken bot one-to-one, and the
+    # cooldown clock starts when the previous message arrived rather than when
+    # its answer finished - so a second question typed while waiting is dropped.
+    settings = Settings(
+        release_root=Path("releases"),
+        model_base_url="https://models.example.test/v1",
+        model_api_key="test-key",
+        allowed_group_ids=frozenset({10001}),
+        allowed_user_ids=frozenset({20001}),
+        user_cooldown_seconds=30.0,
+    )
+    application = CampusQaApplication(answers=RecordingAnswers(), settings=settings)
+
+    first = await application.handle(
+        InboundMessage("m-1", "private", None, 20001, "奖学金怎么申请？")
+    )
+    second = await application.handle(
+        InboundMessage("m-2", "private", None, 20001, "转专业呢？")
+    )
+
+    assert first
+    assert second is not None and "稍等" in second
+
+
+@pytest.mark.asyncio
+async def test_a_group_sender_on_cooldown_gets_silence() -> None:
+    settings = Settings(
+        release_root=Path("releases"),
+        model_base_url="https://models.example.test/v1",
+        model_api_key="test-key",
+        allowed_group_ids=frozenset({10001}),
+        user_cooldown_seconds=30.0,
+    )
+    application = CampusQaApplication(answers=RecordingAnswers(), settings=settings)
+
+    await application.handle(
+        InboundMessage("m-1", "group", 10001, 20001, "奖学金怎么申请？")
+    )
+    second = await application.handle(
+        InboundMessage("m-2", "group", 10001, 20001, "转专业呢？")
+    )
+
+    assert second is None
