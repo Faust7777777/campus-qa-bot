@@ -20,13 +20,16 @@ import hashlib
 import re
 import datetime
 import os
+from pathlib import Path
 import requests
 from playwright.sync_api import sync_playwright
 
-BASE = r"<REPO>"
+BASE = str(Path(__file__).resolve().parents[1])
 TASKS = os.path.join(BASE, "work", "luna_tasks_gapfill_20260807.jsonl")
 OUT = os.path.join(BASE, "work", "fetch_output_gapfill_20260807.jsonl")
-STATE = r"<DESKTOP>\state.json"
+# Outside the repository on purpose: this file holds a logged-in ehall session
+# and must never be committed.  Override with EHALL_STATE.
+STATE = os.getenv("EHALL_STATE", str(Path.home() / "Desktop" / "state.json"))
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",

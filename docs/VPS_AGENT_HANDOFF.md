@@ -5,15 +5,17 @@
 
 ## 目标主机（已核对）
 
+> 本文档公开发布，主机标识已用占位符替换。真实取值见本地未提交的部署记录。
+
 - 地址：`<VPS_HOST>`
-- 用户：`opc`
+- 用户：`<VPS_USER>`
 - 主机：Oracle Linux Server 9.7，`aarch64`，4核
 - 内存：22GiB；核对时约15GiB已用、约7.3GiB可用
 - 根盘：98G，总使用约60G
-- Docker：29.5.2，`opc` 通过 `sudo` 操作
-- 现有 Compose 网络：`qq-mc-bridge_default`
-- 现有容器：`qq-mc-bridge`、`qq-mc-napcat`、`<other-service>`、`<other-service>`、`<other-service>`、`<other-service>`
-- 现有项目：`<VPS_HOME>/qq-mc-bridge`
+- Docker：29.5.2，`<VPS_USER>` 通过 `sudo` 操作
+- 现有 Compose 网络：`<EXISTING_NETWORK>`
+- 现有容器：另有若干与本项目无关的服务在同一主机上运行；部署时只加入既有网络，不改动它们
+- 现有项目：`<VPS_HOME>/<existing-bot>`
 
 SSH 私钥不在交接包中，也不复制到 VPS；使用本地 WSL 的 SSH 配置完成传输。
 

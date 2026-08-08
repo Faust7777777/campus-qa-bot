@@ -8,9 +8,13 @@ import json
 import time
 import csv
 import os
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-OUT = r"<REPO>\work\kb_clean_c.csv"
+# Live ehall session, kept outside the repository: it holds a logged-in
+# session and must never be committed.  Override with EHALL_STATE.
+EHALL_STATE = os.getenv("EHALL_STATE", str(Path.home() / "Desktop" / "state.json"))
+OUT = str(Path(__file__).resolve().parents[1] / "work" / "kb_clean_c.csv")
 
 ANCHORS = [
     "成绩查询",
@@ -90,7 +94,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         ctx = browser.new_context(
-            locale="zh-CN", storage_state=r"<DESKTOP>\state.json"
+            locale="zh-CN", storage_state=EHALL_STATE
         )
         page = ctx.new_page()
         page.goto(

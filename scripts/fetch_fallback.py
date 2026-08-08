@@ -11,9 +11,10 @@ import time
 import hashlib
 import datetime
 import os
+from pathlib import Path
 from playwright.sync_api import sync_playwright
 
-BASE = r"<REPO>"
+BASE = str(Path(__file__).resolve().parents[1])
 OUT = os.path.join(BASE, "work", "fetch_output_fetch_and_extract.jsonl")
 
 

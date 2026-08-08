@@ -11,9 +11,10 @@ import hashlib
 import datetime
 import re
 import os
+from pathlib import Path
 import requests
 
-BASE = r"<REPO>"
+BASE = str(Path(__file__).resolve().parents[1])
 OUT = os.path.join(BASE, "work", "fetch_output_search_sources.jsonl")
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

@@ -28,9 +28,12 @@ import argparse
 import json
 import re
 import sys
+import os
 from pathlib import Path
 
-STATE = Path(r"<DESKTOP>\state.json")
+# Outside the repository on purpose: this file holds a logged-in ehall
+# session and must never be committed.  Override with EHALL_STATE.
+STATE = Path(os.getenv("EHALL_STATE", Path.home() / "Desktop" / "state.json"))
 PROBE_URL = (
     "https://ehall.dlut.edu.cn/fp/visitService"
     "?service_id=7a37a6d4-8a65-488c-bae8-1013f197865e"

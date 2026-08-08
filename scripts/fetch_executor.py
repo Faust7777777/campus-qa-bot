@@ -17,9 +17,10 @@ import hashlib
 import re
 import datetime
 import os
+from pathlib import Path
 import requests
 
-BASE = r"<REPO>"
+BASE = str(Path(__file__).resolve().parents[1])
 TASKS = os.path.join(BASE, "work", "luna_tasks.jsonl")
 OUT = os.path.join(BASE, "work", "fetch_output_{action}.jsonl")
 HEADERS = {

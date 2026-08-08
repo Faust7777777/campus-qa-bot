@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>大连理工大学商学院本科生答疑机器人 — 原理与使用说明</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 20mm; }
+  :root {
+    --ink: #1a1d21;
+    --muted: #5b6672;
+    --line: #d9dee4;
+    --accent: #1a4f8a;
+    --soft: #f4f6f9;
+    --warn: #8a4a1a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    font: 10.5pt/1.75 "Microsoft YaHei", "PingFang SC", "Source Han Sans SC", sans-serif;
+  }
+  code, pre, .mono { font-family: Consolas, "Cascadia Mono", monospace; }
+
+  /* ---------- cover ---------- */
+  .cover { height: 247mm; display: flex; flex-direction: column; justify-content: center; page-break-after: always; }
+  .cover .kicker { color: var(--accent); font-size: 10pt; letter-spacing: .28em; margin-bottom: 10mm; }
+  .cover h1 { font-size: 27pt; line-height: 1.35; margin: 0 0 6mm; font-weight: 700; }
+  .cover .sub { font-size: 13pt; color: var(--muted); margin-bottom: 16mm; font-weight: 400; }
+  .cover .rule { height: 3px; width: 64px; background: var(--accent); margin-bottom: 14mm; }
+  .facts { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4mm 10mm; font-size: 9.5pt; }
+  .facts div { border-top: 1px solid var(--line); padding-top: 2.5mm; }
+  .facts b { display: block; color: var(--muted); font-weight: 400; font-size: 8.5pt; margin-bottom: 1mm; }
+
+  h2 {
+    font-size: 15pt; margin: 11mm 0 4mm; padding-bottom: 2.5mm;
+    border-bottom: 2px solid var(--accent); page-break-after: avoid;
+  }
+  h2 .num { color: var(--accent); margin-right: 3mm; }
+  h3 { font-size: 11.5pt; margin: 7mm 0 2.5mm; color: var(--accent); page-break-after: avoid; }
+  p { margin: 0 0 3.2mm; text-align: justify; }
+  ul, ol { margin: 0 0 3.2mm; padding-left: 6mm; }
+  li { margin-bottom: 1.4mm; }
+
+  table { width: 100%; border-collapse: collapse; margin: 3mm 0 5mm; font-size: 9.5pt; page-break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 2.2mm 3mm; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 600; }
+  td.num, th.num { text-align: right; font-family: Consolas, monospace; white-space: nowrap; }
+
+  pre {
+    background: var(--soft); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    padding: 3mm 4mm; font-size: 8.8pt; line-height: 1.6; overflow-x: auto;
+    margin: 3mm 0 5mm; page-break-inside: avoid; white-space: pre-wrap; word-break: break-all;
+  }
+  code { background: var(--soft); padding: 0 1.2mm; font-size: 9pt; border-radius: 2px; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  .note {
+    background: #fbf7f2; border-left: 3px solid var(--warn); padding: 3mm 4mm;
+    margin: 3mm 0 5mm; font-size: 9.5pt; page-break-inside: avoid;
+  }
+  .note b { color: var(--warn); }
+
+  /* ---------- flow diagram ---------- */
+  .flow { margin: 4mm 0 6mm; page-break-inside: avoid; }
+  .step { display: flex; align-items: stretch; margin-bottom: 1.6mm; }
+  .step .tag {
+    flex: 0 0 26mm; background: var(--accent); color: #fff; font-size: 8.5pt;
+    padding: 2mm 3mm; display: flex; align-items: center; border-radius: 2px 0 0 2px;
+  }
+  .step .tag.local { background: #4a5a6a; }
+  .step .body {
+    flex: 1; border: 1px solid var(--line); border-left: none; padding: 2mm 3mm;
+    font-size: 9pt; border-radius: 0 2px 2px 0;
+  }
+  .step .body em { color: var(--muted); font-style: normal; font-size: 8.5pt; }
+  .arrow { text-align: center; color: var(--line); font-size: 9pt; line-height: 1; margin: 0 0 1.6mm; }
+
+  .kpi { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3mm; margin: 4mm 0 6mm; page-break-inside: avoid; }
+  .kpi div { border: 1px solid var(--line); border-top: 3px solid var(--accent); padding: 3mm; text-align: center; }
+  .kpi .v { font-size: 17pt; font-weight: 700; line-height: 1.2; }
+  .kpi .k { font-size: 8.5pt; color: var(--muted); margin-top: 1mm; }
+
+  .toc { font-size: 10pt; }
+  .toc li { margin-bottom: 1.8mm; }
+  footer { margin-top: 12mm; padding-top: 3mm; border-top: 1px solid var(--line); font-size: 8.5pt; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <div class="kicker">原理与使用说明</div>
+  <h1>大连理工大学商学院<br>本科生答疑机器人</h1>
+  <div class="sub">一个把官方通知原文当作唯一依据的 QQ 群答疑机器人</div>
+  <div class="rule"></div>
+  <div class="facts">
+    <div><b>知识库</b>3 251 张卡片，其中现行 372 张</div>
+    <div><b>发布版本</b>20260808-draft</div>
+    <div><b>机器人账号</b>繁星（3547722840）</div>
+    <div><b>部署形态</b>Docker，ARM64 VPS</div>
+    <div><b>模型网关</b>大连理工大学校内网关</div>
+    <div><b>文档日期</b>2026 年 8 月 8 日</div>
+  </div>
+</section>
+
+<h2><span class="num">一</span>它是什么</h2>
+
+<p>这是一个部署在 QQ 群里的自动答疑机器人，回答商学院本科生关于奖助贷、转专业、图书馆、校园网、户籍、社团等校内事务的问题。它的每一句回答都来自学校官方页面的<strong>原文摘录</strong>，并在回答下方附上该页面的真实链接。</p>
+
+<h3>它会做的事</h3>
+<ul>
+  <li>依据官方通知原文回答校内事务问题，并给出可点击的来源链接</li>
+  <li>听懂口语提问——「食堂好吃不」「体育测试成绩好能不能不上体育课」都算问题，不必写成公文</li>
+  <li>接得住追问——先问「图书馆几点关门」，再问「那要几个人才能订」，它知道第二句在问研修间</li>
+  <li>区分现行规定和往年通知，优先给现行的</li>
+</ul>
+
+<h3>它不会做的事</h3>
+<ul>
+  <li><strong>不编造。</strong>知识库里没有的，它说没有，不会用常识补一个听起来合理的答案</li>
+  <li><strong>不答老师的私人信息。</strong>教师数据从构建期就被排除在知识库之外——不是靠提示词请求它别说，而是那些数据根本不在库里</li>
+  <li>不答校外问题（天气、别的学校）、不闲聊、不回应纯表情和附和</li>
+  <li>不在白名单以外的群说话</li>
+</ul>
+
+<div class="note">
+  <b>一个必须说清楚的前提。</b>这个机器人的可靠性上限，是它引用的那些官方页面的可靠性。它保证「这句话确实出自这个页面」，不保证「这个页面此刻仍然有效」。<strong>涉及截止日期、金额、材料清单的事情，请以回答附带链接的页面为准。</strong>
+</div>
+
+<h2><span class="num">二</span>整体架构</h2>
+
+<p>一条消息从进群到得到回答，要穿过下面这些环节。灰色的在本机完成、不花钱不耗时；蓝色的要调用校内网关的大模型。</p>
+
+<div class="flow">
+  <div class="step"><div class="tag local">0 · 本机</div><div class="body"><strong>消息过滤</strong> —— 群是否在白名单；是不是明显噪声（纯数字、「好的」「哈哈」、重复串）；是不是一个提问。<em>不通过则直接忽略，零成本。</em></div></div>
+  <div class="arrow">▼</div>
+  <div class="step"><div class="tag local">1 · 本机</div><div class="body"><strong>查询计划</strong> —— 从问题里用词法提取校区，其余固定。<em>单轮提问不调用任何模型。</em></div></div>
+  <div class="arrow">▼</div>
+  <div class="step"><div class="tag local">2 · 本机</div><div class="body"><strong>四路召回</strong> —— SQLite 全文检索（BM25）、精确匹配、字符三元组，以及可选的向量检索。<em>用户的原话始终参与检索。</em></div></div>
+  <div class="arrow">▼</div>
+  <div class="step"><div class="tag local">3 · 本机</div><div class="body"><strong>融合与分配</strong> —— 倒数排名融合（RRF）取前 50 张现行卡，另给往年通知 8 张附加位，去重后交给下一步。</div></div>
+  <div class="arrow">▼</div>
+  <div class="step"><div class="tag">4 · 大模型</div><div class="body"><strong>选卡</strong> —— 把全部候选卡片的<strong>标题和正文</strong>一次性交给答案模型，让它读完后挑出真正能回答问题的那几张，或者明确表示一张都不行。</div></div>
+  <div class="arrow">▼</div>
+  <div class="step"><div class="tag">5 · 大模型</div><div class="body"><strong>生成答案</strong> —— 只能看选中的卡片，改写压缩成 300 字以内的中文。</div></div>
+  <div class="arrow">▼</div>
+  <div class="step"><div class="tag local">6 · 本机</div><div class="body"><strong>引用校验</strong> —— 答案里出现的链接，只要不在交给模型的证据中，一律判为伪造并拒绝。链接由程序从卡片附加，不由模型生成。</div></div>
+</div>
+
+<p>只有多轮追问会额外调用一次小模型，用来把「那要几个人才能订」补全成一个完整问句。单轮提问全程只有两次网关调用。</p>
+
+<h2><span class="num">三</span>为什么是「让模型读完候选」，而不是打分排序</h2>
+
+<p>这是整个系统里最重要的一个设计决定，也是唯一一个用数据推翻了原方案的地方。</p>
+
+<h3>原来的做法</h3>
+<p>召回之后接一个专门的重排模型（Reranker）给每张候选卡打分，再用一串阈值筛：分数低于 0.35 的丢掉、按分数分置信档、要求候选和问题的字面重合度达标、要求单一来源覆盖问题的全部功能面。</p>
+
+<h3>实测结果</h3>
+<p>用 30 道按群聊口语改写的问题测下来，这条链路只有 <strong>23 道</strong>引用对了卡片——而正确的卡片在词法召回池里<strong>一次都没丢过</strong>，通常还排在前六名。问题出在排序和那串阈值上：</p>
+
+<ul>
+  <li>重排模型给所有候选打 0.85~0.96，几乎不分辨。「毕业生集体户口迁出」这张卡同时当上了社团注册题和学费退费题的第一名</li>
+  <li>字面重合度这个信号无法区分该答和该拒：必须拒答的问题重合度 38%~67%，应该回答的 15%~60%，两组完全重叠，不存在能分开它们的阈值</li>
+  <li>「单一来源覆盖全部功能面」结构性不可满足：一个来源的正文中位数只覆盖 2 个功能面，而规划器常常要求 3~5 个</li>
+</ul>
+
+<h3>换成让模型读</h3>
+<p>把整个候选池（约 50 张卡的标题和正文，合计约 1.3 万字符）一次性交给答案模型，请它读完后挑。同样 30 道题，<strong>引用对了 28~29 道</strong>；而且它能做出排序器做不到的判断——面对「明天大连下雨吗」「东北财经大学分数线」「商学院王老师的手机号」，它返回空列表，一张都不选。</p>
+
+<p>代价是零：它<strong>替换</strong>了重排模型，网关调用次数不变，延迟中位数反而从 6.26 秒降到 4.86 秒。</p>
+
+<div class="note">
+  <b>一句话总结。</b>排序器只能回答「哪张最像」，无法回答「有没有」。而「这段文字到底能不能回答这个问题」是一个只有读者能settle的问题。把它交给能读的那个模型之后，前面那一串各自从不同角度猜测的阈值就全部可以删掉了——实际删掉了约 300 行代码。
+</div>
+
+<h2><span class="num">四</span>它和「把全文塞进提示词」的做法有什么不同</h2>
+
+<p>另一种常见做法是不做检索：把整份资料塞进系统提示词，每次提问都让模型开卷回答。那种做法更简单，在合适的场景下也更好。区别在这里：</p>
+
+<table>
+  <tr><th style="width:22%">　</th><th>全文塞进提示词</th><th>本项目</th></tr>
+  <tr><td><strong>知识源</strong></td><td>一份人工整理的文档</td><td>50 多个官网来源爬取、抽取、审核而成的 3 251 张卡</td></tr>
+  <tr><td><strong>时效</strong></td><td>一年一版，整体替换</td><td>每张卡带现行/往年标记，官方通知会过期</td></tr>
+  <tr><td><strong>引用</strong></td><td>章节号</td><td>真实 URL，并有防伪造校验</td></tr>
+  <tr><td><strong>每题成本</strong></td><td>每次都付整份资料的输入</td><td>约 1.3 万字符候选，与库的总量无关</td></tr>
+  <tr><td><strong>失败点</strong></td><td>一处</td><td>多处，每一处都可能把答案弄丢</td></tr>
+  <tr><td><strong>规模上限</strong></td><td>提示词装得下多少就是多少</td><td>可以继续加</td></tr>
+</table>
+
+<p>值得说明的是：本项目现在的架构<strong>包含</strong>那种做法。选卡环节读的是「候选池」，把候选池设成「全部卡片」，它就退化成全文塞进提示词的版本，而且还多了引用校验和时效过滤。反过来则不成立。</p>
+
+<h2><span class="num">五</span>实测数据</h2>
+
+<div class="kpi">
+  <div><div class="v">28–29<span style="font-size:10pt">/30</span></div><div class="k">口语改写题引用命中</div></div>
+  <div><div class="v">8<span style="font-size:10pt">/8</span></div><div class="k">多轮追问</div></div>
+  <div><div class="v">4.86<span style="font-size:10pt">秒</span></div><div class="k">单轮延迟中位数</div></div>
+  <div><div class="v">183</div><div class="k">自动化测试</div></div>
+</div>
+
+<table>
+  <tr><th>测量项</th><th class="num">改造前</th><th class="num">现在</th><th>说明</th></tr>
+  <tr><td>30 道口语改写题</td><td class="num">23</td><td class="num">28–29</td><td>题目按群聊口语重写，与卡片索引文字无重叠</td></tr>
+  <tr><td>8 道多轮追问</td><td class="num">8</td><td class="num">8</td><td>第二轮脱离上文无法作答，用于验证指代消解</td></tr>
+  <tr><td>44 题冒烟集通过</td><td class="num">26</td><td class="num">33</td><td>含 25 道知识库尚未覆盖的缺口题</td></tr>
+  <tr><td>6 道必须拒答</td><td class="num">3</td><td class="num">5–6</td><td>校外问题、他校问题、教师隐私</td></tr>
+  <tr><td>单轮延迟中位</td><td class="num">6.26 秒</td><td class="num">4.86 秒</td><td>单轮不再调用规划器</td></tr>
+</table>
+
+<p>还有 1~2 道稳定不过：一道是网关侧的偶发失败（同一题五次跑挂了四次），一道是知识库里存在三张内容高度重叠的助学贷款卡片，机器人在其中摇摆——它给出的答案是对的，只是没命中评测标注的那一张。</p>
+
+<h2><span class="num">六</span>怎么用</h2>
+
+<h3>在群里</h3>
+<p>直接把问题打出来即可，不需要 @ 机器人，也不需要写问号。下面这些都会被识别成提问：</p>
+<pre>食堂好吃不            奖学金咋申请           能不能申请助学金
+宿舍空调是不是坏了     图书馆几点关门          有没有勤工助学岗
+转专业难不难          这个要交钱吗</pre>
+
+<p>下面这些不会触发，机器人保持沉默：</p>
+<pre>好的      哈哈      666      收到谢谢      今天天气不错      我不去了</pre>
+
+<p>如果一句话它没识别成提问，在开头加 <code>#</code> 可以强制提问：<code>#新生报到材料</code>。</p>
+
+<h3>找不到答案时会怎样</h3>
+<ul>
+  <li><strong>群里保持沉默。</strong>对每一句路过的「为什么」都回一句「知识库暂未收录」，这种噪声算在机器人头上，不如不说</li>
+  <li><strong>私聊一定回话。</strong>一对一时你无法区分「被过滤了」和「没找到」和「坏了」，所以私聊总会给出回应</li>
+  <li><code>#</code> 开头的强制提问一定回话</li>
+</ul>
+
+<h3>白名单</h3>
+<p>机器人只在配置的群里说话，只接受配置的 QQ 号私聊。这不是可选项——两个白名单都为空时它会拒绝启动答疑逻辑。</p>
+
+<h2><span class="num">七</span>知识库怎么加东西</h2>
+
+<p>一条知识在库里是一张「卡」，包含标题、<strong>原文摘录</strong>、来源 URL、适用校区、现行与否等字段。构建时有一条硬约束：<strong>事实卡的原文摘录必须逐字出现在来源页面的正文里</strong>，否则构建直接失败。这是「不编造」这件事在工程上的落点。</p>
+
+<pre>1. 准备卡片      从官网抓取 → 抽取成卡 → 审核（approved / downgraded / rejected）
+2. 构建          build --reviewed 卡片.jsonl --review-report 报告.json --version 20260810
+3. 激活          activate --version 20260810</pre>
+
+<p>构建会为每张卡计算一个 1024 维向量。整库 3 264 张卡如果全算，约需 102 次网关调用。因此构建带一个<strong>向量缓存</strong>：</p>
+
+<pre>work/embedding_cache.bin      13.5 MB，默认自动读写
+
+新增 5 张卡再构建  →  复用 3 264 条，只算 5 条  →  102 次调用降到 1 次</pre>
+
+<p>缓存的键是「实际被嵌入的那段文字」的摘要，不是卡片编号。所以改了卡片的文字就一定重算，不会拿旧向量糊弄新内容；而改编号或调顺序、文字没变的，直接复用。缓存文件丢失或损坏时按「没有缓存」处理，重算即可，不会导致构建失败。</p>
+
+<h2><span class="num">八</span>部署结构</h2>
+
+<pre>campus-qa-napcat     QQ 协议层，OneBot 11。独立容器、独立网络、独立数据目录，
+                     与 VPS 上已有的另一个机器人完全隔离
+        │  收到群消息 / 私聊，HTTP 上报
+        ▼
+campus-qa-bot        NoneBot 应用 + 检索问答。只读挂载发布库，只读根文件系统，
+                     丢弃全部 capability，内存上限 1 GB
+        │
+        ▼
+releases/            不可变发布目录。current.json 指向当前生效的版本，
+                     切换版本是一次原子指针替换</pre>
+
+<p>两个容器在同一个 Docker 网络内用容器名互相寻址，均不对公网暴露端口。网关密钥只存在于宿主机的 <code>.env</code>（权限 600），不进代码仓库、不进日志、不进任何交接包。</p>
+
+<h2><span class="num">九</span>已知局限</h2>
+
+<ol>
+  <li><strong>知识库有缺口。</strong>44 题冒烟集里有 25 道是已知未覆盖的事项（重修、绩点规则、快递、班车、体检报销等）。问到这些，它会给出官方入口链接或直接说没有</li>
+  <li><strong>不保证时效。</strong>它保证引文出自那个页面，不保证页面此刻仍然有效。涉及日期和金额请点开链接核对</li>
+  <li><strong>依赖校内网关。</strong>网关不稳时机器人会明确报错，不会用旧数据或常识硬答</li>
+  <li><strong>正式评测尚未通过。</strong>项目定义了一套 240 题、11 项阈值的发布评测；当前版本没有跑通它就上线了，属于自用取舍。上面所有数字来自另外三套非循环测试集，不是那套正式评测</li>
+  <li><strong>回答会改写原文。</strong>为了可读性，答案是对证据的忠实压缩而非逐字引用。追求逐字的场合请以链接页面为准</li>
+</ol>
+
+<footer>
+  大连理工大学商学院本科生答疑机器人 · 原理与使用说明 · 2026 年 8 月<br>
+  本文所有性能数字均为实测值，测试集与测量方法见项目仓库 <code>evaluation/</code> 与 <code>scripts/</code>。
+</footer>
+
+</body>
+</html>

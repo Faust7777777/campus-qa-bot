@@ -8,3 +8,8 @@ build/
 .env
 releases/
 work/
+
+# NapCat runtime state: a logged-in QQ session and its tokens.
+napcat-data/
+# Rendered documentation; the HTML source is tracked, the PDF is not.
+*.pdf

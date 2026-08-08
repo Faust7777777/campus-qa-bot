@@ -85,7 +85,7 @@ campus-qa-kb rescue-search-tasks `
 
 ```powershell
 campus-qa-kb catalog `
-  --web <DESKTOP>\智能体交接包\data\web_plus_index.csv `
+  --web <交接包>/data/web_plus_index.csv `
   --output work\source_catalog_2026_v2_reviewed.jsonl `
   --report work\source_catalog_2026_v2_review.json `
   --as-of-year 2026
