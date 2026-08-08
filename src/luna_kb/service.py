@@ -474,8 +474,16 @@ class Runtime:
             reranker_url=settings.reranker_url,
             timeout=settings.request_timeout,
         )
-        evaluation_report = json.loads(
-            (release_path / "evaluation_report.json").read_text(encoding="utf-8")
+        # A release may ship without ever having been evaluated, so the report
+        # is read if it is there and its absence is not a failure.  Making the
+        # evaluation gate advisory in release.py left this read unguarded: the
+        # first release built after that change had no report, and the bot came
+        # up unable to answer anything while reporting healthy.
+        evaluation_path = release_path / "evaluation_report.json"
+        evaluation_report = (
+            json.loads(evaluation_path.read_text(encoding="utf-8"))
+            if evaluation_path.is_file()
+            else {}
         )
         active_model_config = release_model_config(
             endpoints,
@@ -495,19 +503,27 @@ class Runtime:
         # The embedding model and its dimension are different.  Vectors built by
         # one model are meaningless to another, and that is a wrong answer rather
         # than a stale attribution, so those still stop startup.
-        evaluated_config = evaluation_report.get("model_config") or {}
+        # The embedding check belongs against the build report, not the
+        # evaluation: what matters is the model that produced the vectors in
+        # this database, and the build report always exists while an evaluation
+        # may never have been run.  Comparing against an absent evaluation made
+        # every unevaluated release look like a model mismatch.
+        build_config = json.loads(
+            (release_path / "build_report.json").read_text(encoding="utf-8")
+        ).get("model_config") or {}
         for field in ("embedding", "embedding_dimension"):
-            if evaluated_config.get(field) != active_model_config.get(field):
+            if str(build_config.get(field)) != str(active_model_config.get(field)):
                 raise RetrievalUnavailable(
                     "release",
                     f"database was built with a different {field}",
                 )
+        evaluated_config = evaluation_report.get("model_config") or {}
         drifted = sorted(
             field
             for field in set(evaluated_config) | set(active_model_config)
             if evaluated_config.get(field) != active_model_config.get(field)
         )
-        if drifted:
+        if evaluated_config and drifted:
             _log.warning(
                 "release %s was evaluated with different %s; its numbers describe "
                 "a different configuration",
