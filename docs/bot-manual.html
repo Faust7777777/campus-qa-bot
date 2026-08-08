@@ -135,7 +135,7 @@
   <div class="arrow">▼</div>
   <div class="step"><div class="tag local">1 · 本机</div><div class="body"><strong>查询计划</strong> —— 从问题里用词法提取校区，其余固定。<em>单轮提问不调用任何模型。</em></div></div>
   <div class="arrow">▼</div>
-  <div class="step"><div class="tag local">2 · 本机</div><div class="body"><strong>四路召回</strong> —— SQLite 全文检索（BM25）、精确匹配、字符三元组，以及可选的向量检索。<em>用户的原话始终参与检索。</em></div></div>
+  <div class="step"><div class="tag local">2 · 本机</div><div class="body"><strong>词法召回</strong> —— SQLite 全文检索（BM25）、精确匹配、字符三元组。<em>用户的原话始终参与检索；向量召回默认关闭，实测买不到准确率却每题多一次网关调用。</em></div></div>
   <div class="arrow">▼</div>
   <div class="step"><div class="tag local">3 · 本机</div><div class="body"><strong>融合与分配</strong> —— 倒数排名融合（RRF）取前 50 张现行卡，另给往年通知 8 张附加位，去重后交给下一步。</div></div>
   <div class="arrow">▼</div>
