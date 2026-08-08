@@ -16,7 +16,11 @@ QUESTION_CUES = (
 # punctuation, not in what was asked, and most people do not punctuate a chat
 # message.  Two patterns cover most of the rest: a sentence ending in 吗/呢/不,
 # and the A-not-A form (能不能, 是不是, 好不好, 用不用).
-QUESTION_TAILS = ("吗", "呢", "不")
+QUESTION_TAILS = ("吗", "呢", "不", "嘛")
+# 「教材什么的」「填资料啥的」里的啥/什么是枚举后缀，不表疑问，却让整句
+# 被当成提问。跟在 是/干/做/搞 后面的除外——「志工部是干啥的」问的正是这个。
+# 实测：这条改判 94 条真实群聊消息，其中 80 条确实是噪声。
+ENUMERATION_SUFFIX = re.compile(r"(?<![是干做搞])(啥|什么)的")
 A_NOT_A = re.compile(r"(.)不\1")
 NOISE_PHRASES = frozenset(
     {
@@ -116,6 +120,7 @@ class MessagePolicy:
 
     @staticmethod
     def _reads_as_a_question(text: str) -> bool:
+        text = ENUMERATION_SUFFIX.sub("", text)
         stripped = text.rstrip("。.! ！~ ")
         return (
             text.endswith(("?", "？"))
